@@ -13,13 +13,21 @@ is the "ephemeral worker / CI agent / one-off task runner" shape.
 ┌──────────────────────────────── DOCKER HOST ────────────────────────────────┐
 │  ┌─────────────── CONTAINER (clawborrator-worker:latest) ────────────────┐  │
 │  │                                                                       │  │
-│  │  /workspace  (bind mount or volume — persists across restarts)        │  │
-│  │     └── (optional) `git clone ${REPO_URL}` on first run               │  │
-│  │     └── .mcp.json  ← written at entrypoint w/ ${CLAWBORRATOR_TOKEN}   │  │
-│  │     └── …project files…                                               │  │
+│  │  /home/worker/.claude/  (named volume `claude-home`)                  │  │
+│  │     ├── .credentials.json   ← seeded from env on first boot;          │  │
+│  │     │                         claude refreshes it after — never       │  │
+│  │     │                         re-clobbered.                           │  │
+│  │     └── …per-user CC state…                                           │  │
+│  │                                                                       │  │
+│  │  /workspace/  (claude's cwd — bind mount or named volume)             │  │
+│  │     ├── .mcp.json    ← written at entrypoint w/ ${CLAWBORRATOR_TOKEN} │  │
+│  │     ├── .claude/     ← project-level hooks + settings.local           │  │
+│  │     ├── CLAUDE.md    ← orientation note for claude                    │  │
+│  │     └── repo/        ← `git clone ${REPO_URL}` lands here             │  │
+│  │         └── .git/, src/, …                                            │  │
 │  │                                                                       │  │
 │  │  $ claude --dangerously-load-development-channels server:clawborrator │  │
-│  │     │                                                                 │  │
+│  │     │   (cwd = /workspace, NOT /workspace/repo)                       │  │
 │  │     └─► spawns `npx -y clawborrator-mcp`                              │  │
 │  │           └─► dials wss://next.clawborrator.com/channel               │  │
 │  │                                                                       │  │
@@ -73,9 +81,9 @@ docker run --rm -it --env-file .env -v "$(pwd)/workspace:/workspace" \
 ## Authentication
 
 This image uses **OAuth credentials** (Claude Max subscription
-flow), NOT a raw API key. The entrypoint writes a standard
-`~/.claude/.credentials.json` file at startup from your env vars,
-matching the shape Claude Code creates locally after an interactive
+flow), NOT a raw API key. The entrypoint seeds a standard
+`~/.claude/.credentials.json` file on **first boot only** from your
+env vars, matching the shape Claude Code creates after an interactive
 `claude` login.
 
 Minimum: `ANTHROPIC_ACCESS_TOKEN`. Strongly recommended:
@@ -88,9 +96,55 @@ Optional fine-tuning: `ANTHROPIC_TOKEN_EXPIRES_AT` (unix ms),
 `ANTHROPIC_RATE_LIMIT_TIER` (default `default_claude_max_20x`).
 
 The materialized credentials file lives at
-`/root/.claude/.credentials.json` inside the container with mode
-`0600`. Anyone with shell access to the container can read it;
+`/home/worker/.claude/.credentials.json` inside the container with
+mode `0600`. Anyone with shell access to the container can read it;
 treat container access as token-equivalent.
+
+### Credentials persistence (named volume)
+
+`~/.claude/` is mounted as a docker named volume (`claude-home`) so
+the credentials file survives across `docker compose down/up`. This
+is **load-bearing**: Anthropic's OAuth refresh tokens are single-use,
+and Claude Code rewrites `.credentials.json` every time it refreshes.
+Without the volume, every container restart would clobber the freshly-
+refreshed tokens with the (now-stale) values from `.env`, and the
+worker would 401 within hours.
+
+The first boot of a fresh volume seeds from `.env`. From that point
+on, the in-container claude maintains the file itself — the
+entrypoint detects the existing file and leaves it alone.
+
+To force a re-seed (e.g., after rotating credentials externally):
+
+```bash
+docker compose down
+docker volume rm worker_v1_claude-home
+docker compose up -d   # entrypoint will re-seed from current .env
+```
+
+### Why you should NOT share host credentials with the worker
+
+The credential chain in your host's `~/.claude/.credentials.json` is
+the one your local `claude` is actively refreshing. The moment either
+side (host or worker) refreshes, the other's copy of the refresh
+token is invalidated. They cannot coexist long-term on the same
+chain.
+
+**Mint a worker-dedicated credential** instead:
+
+1. Run an interactive container once with no creds set:
+   ```bash
+   docker run --rm -it -v worker-bootstrap:/home/worker/.claude \
+     --entrypoint bash clawborrator-worker:latest
+   ```
+2. Inside, run `claude` and walk the OAuth flow in your browser.
+3. `cat ~/.claude/.credentials.json` and copy the `accessToken` +
+   `refreshToken` values into your worker's `.env`.
+4. Optionally also `docker cp` the volume contents into the
+   `claude-home` named volume to skip the first-boot seed entirely.
+
+Now host and worker have independent token chains; neither
+refreshing affects the other.
 
 ## Modes
 
@@ -146,8 +200,11 @@ that file rather than memorizing the table below.
 | `ANTHROPIC_RATE_LIMIT_TIER` | no | `default_claude_max_20x` | Rate-limit tier label. |
 | `CLAWBORRATOR_TOKEN` | no | unset | `ck_live_…` channel token. If unset, no hub integration. |
 | `CLAWBORRATOR_HUB_URL` | no | `wss://next.clawborrator.com` | Override for self-hosted hubs. |
-| `REPO_URL` | no | unset | Git URL; cloned into /workspace on first run only. |
+| `REPO_URL` | no | unset | Git URL (plain, no embedded creds); cloned into `/workspace/${REPO_DIR_NAME}` on first run only. |
 | `REPO_REF` | no | unset | Branch/tag/sha to check out after clone. |
+| `REPO_PAT` | no | unset | Personal access token. Spliced into `REPO_URL` at clone time for private repos. **Persists in `.git/config`** — treat container access as PAT-equivalent. |
+| `REPO_PAT_USER` | no | `x-access-token` | Username paired with `REPO_PAT`. GitHub: leave default. GitLab: `oauth2`. Self-hosted: your username. |
+| `REPO_DIR_NAME` | no | `repo` | Subdir under `/workspace` where the clone lands. Keeps worker plumbing (`.mcp.json`, `.claude/`, `CLAUDE.md`) at `/workspace/` and the repo at `/workspace/<this>/`. |
 | `CLAUDE_SKIP_PERMISSIONS` | no | `0` | `"1"` adds `--dangerously-skip-permissions`. See safety note below. |
 | `CLAUDE_INITIAL_PROMPT` | no | unset | One-shot prompt at startup. |
 
@@ -155,7 +212,10 @@ that file rather than memorizing the table below.
 
 ## Volumes
 
-`/workspace` is the working directory Claude operates in. Two patterns:
+The image expects two volumes — one for the workspace, one for the
+worker's persistent Claude Code state.
+
+**`/workspace`** — claude's working directory. Two patterns:
 
 - **Bind mount** (`-v "$(pwd)/workspace:/workspace"`) — host-side
   access, survives `docker compose down`, easy to inspect via local
@@ -163,8 +223,36 @@ that file rather than memorizing the table below.
 - **Named volume** (`-v worker-workspace:/workspace`) — Docker-managed,
   no host-side path leak, slightly more portable.
 
-If `/workspace` is empty AND `REPO_URL` is set, the entrypoint
-clones for you. If it's non-empty, the existing contents win.
+If `/workspace/${REPO_DIR_NAME}` is missing AND `REPO_URL` is set,
+the entrypoint clones for you. If it's already present, the existing
+checkout wins.
+
+### Layout inside `/workspace`
+
+Claude's cwd is `/workspace`, **not** the cloned repo. The repo lives
+in a subdir (`./${REPO_DIR_NAME}/`, default `./repo/`). This keeps
+worker plumbing fully separate from the repo's working tree:
+
+```
+/workspace/
+├── .mcp.json     ← worker plumbing (NOT in the repo's git history)
+├── .claude/      ← worker plumbing — hooks, settings.local, etc.
+├── CLAUDE.md     ← orientation note auto-written by the entrypoint;
+│                   tells claude the repo is in ./repo
+└── repo/         ← cloned codebase, untouched by worker plumbing
+    ├── .git/
+    └── …
+```
+
+Trade-off: `git status` from `/workspace` fails (it's not a repo).
+The auto-written `CLAUDE.md` instructs claude to `cd repo` or use
+`git -C repo …` for git operations.
+
+**`/home/worker/.claude`** — claude's per-user state (credentials,
+projects, sessions). Mounted as a docker named volume
+(`claude-home`) so the OAuth credential chain survives container
+restart. See the *Credentials persistence* section above for why
+this is load-bearing.
 
 ---
 
@@ -198,6 +286,78 @@ If you're running behind a strict egress firewall, allow at minimum
   IS on disk inside the container — anyone with shell access to
   the container can read it. Treat container access as
   token-equivalent.
+- **`/var/run/docker.sock` mount** (see *Spawning sibling workers*
+  below) gives the container root-equivalent access to the host's
+  Docker daemon. Anyone inside — including a prompt-injection that
+  tricks claude into running a malicious `docker run` — can mount
+  `/` from the host, run privileged containers, or escape the
+  sandbox entirely. The image installs the `docker` CLI but only
+  uses it when the socket is actually mounted in. **Mount the
+  socket only on workers that need to spawn siblings, never as a
+  blanket default.**
+
+---
+
+## Spawning sibling workers
+
+Mount the host's Docker socket into a worker and that worker can
+spawn other workers on the same Docker host. The pattern is "Docker
+outside of Docker" (DooD) — the in-container `docker` CLI talks to
+the *host* daemon over the socket; spawned containers become
+siblings of the parent on the same host, not nested children.
+
+**Enable on a worker:**
+
+1. Mount the socket. In `docker-compose.yml`, the line is already
+   there commented in by default — leave it active when you want
+   the swarm primitive, comment it out otherwise. For plain
+   `docker run`, add `-v /var/run/docker.sock:/var/run/docker.sock`.
+2. The entrypoint auto-detects the socket on boot. It reads the
+   socket's GID, creates a matching group inside the container,
+   and adds the `worker` user to it. Look for this line in
+   `docker logs`:
+   ```
+   [worker] docker.sock detected (gid=999, group=docker_host) — worker added
+   ```
+3. The worker user can now run `docker` directly:
+   ```bash
+   docker ps      # lists *host* containers (including self)
+   docker run …   # spawns a sibling on the host
+   ```
+
+**Spawn from inside claude (via its Bash tool):**
+
+```bash
+docker run -d --rm \
+  --name worker-child-$(date +%s) \
+  -e CLAWBORRATOR_TOKEN="$CLAWBORRATOR_TOKEN" \
+  -e ANTHROPIC_ACCESS_TOKEN="$ANTHROPIC_ACCESS_TOKEN" \
+  -e ANTHROPIC_REFRESH_TOKEN="$ANTHROPIC_REFRESH_TOKEN" \
+  -e REPO_URL="https://github.com/your/repo.git" \
+  -e REPO_PAT="$REPO_PAT" \
+  -e CLAUDE_INITIAL_PROMPT="$WORK_DESCRIPTION" \
+  clawborrator-worker:latest
+```
+
+The new container's claude registers with the hub within ~10–15s.
+It shows up in the parent's `list_peers` as a fresh `@workspace-…`
+entry; the parent can then `route_to_peer` to dispatch work.
+
+**Wait-for-ready + dispatch + cleanup** — see the orchestration
+guide in `<repo>/hub_v1/docs/SWARM-NOTES.md` (TODO) for end-to-end
+swarm patterns.
+
+**Terminate a child:**
+
+```bash
+docker rm -f worker-child-<id>
+```
+
+The WS closes, the hub marks the session offline, the container
+disappears from `docker ps`. No hub-side action needed.
+
+**Caveat reminder:** Mounting docker.sock = root on host. Only do
+this when you specifically want the swarm pattern.
 
 ---
 

@@ -58,69 +58,90 @@ if [ "$(id -u)" = "0" ]; then
   #   - subscriptionType + rateLimitTier: match Claude Max.
   CREDS_DIR="${WORKER_HOME}/.claude"
   CREDS_FILE="${CREDS_DIR}/.credentials.json"
+  GLOBAL_CFG="${WORKER_HOME}/.claude.json"
+  SETTINGS_FILE="${CREDS_DIR}/settings.json"
   mkdir -p "${CREDS_DIR}"
 
-  jq -n \
-    --arg at   "${ANTHROPIC_ACCESS_TOKEN}" \
-    --arg rt   "${ANTHROPIC_REFRESH_TOKEN:-}" \
-    --argjson exp "${ANTHROPIC_TOKEN_EXPIRES_AT:-9999999999999}" \
-    --arg sub  "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}" \
-    --arg tier "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}" \
-    '{
-      claudeAiOauth: {
-        accessToken:      $at,
-        refreshToken:     $rt,
-        expiresAt:        $exp,
-        scopes: [
-          "user:file_upload",
-          "user:inference",
-          "user:mcp_servers",
-          "user:profile",
-          "user:sessions:claude_code"
-        ],
-        subscriptionType: $sub,
-        rateLimitTier:    $tier
-      }
-    }' > "${CREDS_FILE}"
-
-  chmod 600 "${CREDS_FILE}"
-  echo "[worker] wrote ${CREDS_FILE} (claudeAiOauth, subscription=${ANTHROPIC_SUBSCRIPTION_TYPE:-max})"
-
-  # ─── Pre-seed Claude Code onboarding state ─────────────────────
-  # A headless worker can't answer first-run prompts. Pre-write the
-  # global ~/.claude.json and ~/.claude/settings.json with the keys
-  # that skip every interactive bootstrap step: welcome flow, theme
-  # picker, "trust this folder?", CLAUDE.md external-includes
-  # warning, bypass-permissions warning, MCP-server approval. Keys
-  # extracted from a known-good local install.
-  NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-  GLOBAL_CFG="${WORKER_HOME}/.claude.json"
-
-  jq -n \
-    --arg now "${NOW_ISO}" \
-    '{
-      hasCompletedOnboarding:   true,
-      firstStartTime:           $now,
-      installMethod:            "native",
-      autoUpdates:              false,
-      projects: {
-        "/workspace": {
-          hasTrustDialogAccepted:                  true,
-          hasClaudeMdExternalIncludesApproved:     true,
-          hasClaudeMdExternalIncludesWarningShown: true,
-          # enableAllProjectMcpServers + enabledMcpjsonServers
-          # pre-resolve the "New MCP server found in .mcp.json"
-          # approval prompt. Belt-and-suspenders in case a future
-          # CC version checks only one of the two keys.
-          enableAllProjectMcpServers:              true,
-          enabledMcpjsonServers:                   ["clawborrator"]
+  # ─── First-boot credential seed (idempotent skip on persisted volume) ───
+  # When ${WORKER_HOME}/.claude is a docker named volume, the file
+  # survives container restart. Claude Code rewrites .credentials.json
+  # itself whenever it refreshes the OAuth token chain, so the .env-
+  # supplied tokens are only a first-boot seed. Overwriting on every
+  # boot would destroy the freshly-refreshed credentials that the
+  # in-container claude has been maintaining — exactly the host/
+  # container token-sharing failure that motivated this volume in
+  # the first place.
+  if [ -f "${CREDS_FILE}" ]; then
+    echo "[worker] ${CREDS_FILE} already present — keeping (worker maintains its own OAuth chain)"
+  else
+    jq -n \
+      --arg at   "${ANTHROPIC_ACCESS_TOKEN}" \
+      --arg rt   "${ANTHROPIC_REFRESH_TOKEN:-}" \
+      --argjson exp "${ANTHROPIC_TOKEN_EXPIRES_AT:-9999999999999}" \
+      --arg sub  "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}" \
+      --arg tier "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}" \
+      '{
+        claudeAiOauth: {
+          accessToken:      $at,
+          refreshToken:     $rt,
+          expiresAt:        $exp,
+          scopes: [
+            "user:file_upload",
+            "user:inference",
+            "user:mcp_servers",
+            "user:profile",
+            "user:sessions:claude_code"
+          ],
+          subscriptionType: $sub,
+          rateLimitTier:    $tier
         }
-      }
-    }' > "${GLOBAL_CFG}"
+      }' > "${CREDS_FILE}"
+    chmod 600 "${CREDS_FILE}"
+    echo "[worker] seeded ${CREDS_FILE} from env (claudeAiOauth, subscription=${ANTHROPIC_SUBSCRIPTION_TYPE:-max})"
+  fi
 
-  SETTINGS_FILE="${CREDS_DIR}/settings.json"
+  # ─── Pre-seed Claude Code onboarding state (first boot only) ───
+  # A headless worker can't answer first-run prompts. Pre-write the
+  # global ~/.claude.json with the keys that skip every interactive
+  # bootstrap step: welcome flow, theme picker, "trust this folder?",
+  # CLAUDE.md external-includes warning, bypass-permissions warning,
+  # MCP-server approval. Keys extracted from a known-good local
+  # install. First-boot-only because claude itself updates this file
+  # over time (recent dirs, per-project state) and we don't want to
+  # clobber that on restart.
+  NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+  if [ -f "${GLOBAL_CFG}" ]; then
+    echo "[worker] ${GLOBAL_CFG} already present — keeping (claude maintains project state)"
+  else
+    jq -n \
+      --arg now "${NOW_ISO}" \
+      '{
+        hasCompletedOnboarding:   true,
+        firstStartTime:           $now,
+        installMethod:            "native",
+        autoUpdates:              false,
+        projects: {
+          "/workspace": {
+            hasTrustDialogAccepted:                  true,
+            hasClaudeMdExternalIncludesApproved:     true,
+            hasClaudeMdExternalIncludesWarningShown: true,
+            # enableAllProjectMcpServers + enabledMcpjsonServers
+            # pre-resolve the "New MCP server found in .mcp.json"
+            # approval prompt. Belt-and-suspenders in case a future
+            # CC version checks only one of the two keys.
+            enableAllProjectMcpServers:              true,
+            enabledMcpjsonServers:                   ["clawborrator"]
+          }
+        }
+      }' > "${GLOBAL_CFG}"
+    echo "[worker] seeded ${GLOBAL_CFG}"
+  fi
+
+  # settings.json is rewritten on every boot — it's env-driven
+  # configuration (CLAUDE_SKIP_PERMISSIONS toggle takes effect on
+  # restart), not state. Claude code doesn't mutate this file at
+  # runtime, so overwriting is safe.
   SKIP_DANGEROUS=$([ "${CLAUDE_SKIP_PERMISSIONS:-0}" = "1" ] && echo true || echo false)
-
   jq -n \
     --argjson skipDangerous "${SKIP_DANGEROUS}" \
     '{
@@ -132,8 +153,7 @@ if [ "$(id -u)" = "0" ]; then
         defaultMode: "auto"
       }
     }' > "${SETTINGS_FILE}"
-
-  echo "[worker] seeded onboarding state in ${GLOBAL_CFG} + ${SETTINGS_FILE}"
+  echo "[worker] wrote ${SETTINGS_FILE} (skipDangerous=${SKIP_DANGEROUS})"
 
   # Fix ownership before dropping privileges. Bind-mounted /workspace
   # may have arrived owned by some other uid (Docker creates the
@@ -141,6 +161,32 @@ if [ "$(id -u)" = "0" ]; then
   # worker user needs to own it to write .mcp.json + run claude.
   chown -R "${WORKER_USER}:${WORKER_USER}" "${WORKER_HOME}"
   chown -R "${WORKER_USER}:${WORKER_USER}" /workspace
+
+  # ─── Docker socket access (optional — only if mounted) ─────────
+  # If /var/run/docker.sock is mounted in, give the worker user
+  # access. The socket arrives with whatever GID the host's docker
+  # group uses (varies by platform), which won't match any group
+  # the worker user is in by default. Solution: read the socket's
+  # GID, create a matching group inside the container (or use any
+  # existing group with that GID), add worker to it.
+  #
+  # The worker is added to the existing group whose GID matches —
+  # if no group exists at that GID, we create one called
+  # `docker_host`. This is the standard "Docker outside of Docker"
+  # permission pattern.
+  #
+  # Skipping the socket mount entirely (the default for workers
+  # that don't need to spawn) means this block silently no-ops.
+  if [ -S /var/run/docker.sock ]; then
+    SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+    SOCK_GROUP=$(getent group "${SOCK_GID}" | cut -d: -f1 || true)
+    if [ -z "${SOCK_GROUP}" ]; then
+      groupadd --gid "${SOCK_GID}" docker_host
+      SOCK_GROUP=docker_host
+    fi
+    usermod -aG "${SOCK_GROUP}" "${WORKER_USER}"
+    echo "[worker] docker.sock detected (gid=${SOCK_GID}, group=${SOCK_GROUP}) — ${WORKER_USER} added"
+  fi
 
   # Drop privileges via gosu. HOME is set explicitly so claude
   # finds the credentials we just wrote.
@@ -154,22 +200,155 @@ fi
 
 cd /workspace
 
+# ─── Git identity ──────────────────────────────────────────────
+# Without these, the first commit fails with "Please tell me who you
+# are" and claude burns a turn running `git config user.email/name`
+# itself. Cheap to set per-boot; lives in ~/.gitconfig (worker's
+# HOME, not the persisted ~/.claude volume) so it always reflects
+# the current env. Empty env → skip (and claude will see the friendly
+# git error on the first commit, no harm).
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+  git config --global user.email "${GIT_USER_EMAIL}"
+fi
+if [ -n "${GIT_USER_NAME:-}" ]; then
+  git config --global user.name  "${GIT_USER_NAME}"
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ] || [ -n "${GIT_USER_NAME:-}" ]; then
+  echo "[worker] git identity: ${GIT_USER_NAME:-(unset)} <${GIT_USER_EMAIL:-(unset)}>"
+fi
+
 # ─── Optional repo clone ─────────────────────────────────────────
-# Only clones if REPO_URL is set AND /workspace doesn't already
+# Claude's cwd is /workspace, NOT the cloned repo. We clone one
+# level deeper into /workspace/${REPO_DIR_NAME:-repo} so the repo's
+# working tree stays untouched by worker plumbing (.mcp.json, .claude/,
+# CLAUDE.md all live at /workspace/, not inside the repo). Trade-off:
+# `git status` from claude's cwd fails — operator/claude has to
+# `cd repo` or use `git -C repo …`. The /workspace/CLAUDE.md note
+# written below orients claude to this layout.
+#
+# Only clones if REPO_URL is set AND the target dir doesn't already
 # have a .git directory. So the second container boot reuses the
 # existing checkout — git pull is up to whatever Claude or the
 # operator runs.
+REPO_DIR="/workspace/${REPO_DIR_NAME:-repo}"
 if [ -n "${REPO_URL:-}" ]; then
-  if [ -d /workspace/.git ]; then
-    echo "[worker] /workspace already contains a git checkout — skipping clone"
+  if [ -d "${REPO_DIR}/.git" ]; then
+    echo "[worker] ${REPO_DIR} already contains a git checkout — skipping clone"
   else
-    echo "[worker] cloning ${REPO_URL} into /workspace"
-    git clone "${REPO_URL}" /workspace
-    if [ -n "${REPO_REF:-}" ]; then
+    # Splice PAT into the URL if one was supplied. We rewrite into
+    # https://<user>:<pat>@<host>/<path>. The full credentialed URL
+    # is what `git clone` actually uses; we only echo the redacted
+    # form so the PAT doesn't end up in `docker logs`. It DOES still
+    # land in ${REPO_DIR}/.git/config after clone (so subsequent
+    # fetch/push from inside CC keep working) — see .env.example
+    # for the security caveat.
+    EFFECTIVE_REPO_URL="${REPO_URL}"
+    if [ -n "${REPO_PAT:-}" ]; then
+      case "${REPO_URL}" in
+        https://*)
+          host_path="${REPO_URL#https://}"
+          EFFECTIVE_REPO_URL="https://${REPO_PAT_USER:-x-access-token}:${REPO_PAT}@${host_path}"
+          echo "[worker] cloning ${REPO_URL} into ${REPO_DIR} (PAT spliced)"
+          ;;
+        *)
+          echo "[worker] REPO_PAT set but REPO_URL is not https:// — cloning without credentials"
+          echo "[worker] cloning ${REPO_URL} into ${REPO_DIR}"
+          ;;
+      esac
+    else
+      echo "[worker] cloning ${REPO_URL} into ${REPO_DIR}"
+    fi
+    # `git clone … <target>` creates the target dir; ensure parent
+    # exists and is writable.
+    mkdir -p "$(dirname "${REPO_DIR}")"
+    # Don't `set -e`-exit on a missing ref — that's a recoverable
+    # state (e.g., empty repo with no main yet); just warn.
+    if ! git clone "${EFFECTIVE_REPO_URL}" "${REPO_DIR}"; then
+      echo "[worker] git clone failed — continuing without a repo (you can clone manually inside the container)"
+    elif [ -n "${REPO_REF:-}" ]; then
       echo "[worker] checking out ref ${REPO_REF}"
-      git -C /workspace checkout "${REPO_REF}"
+      git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
+        echo "[worker] ref ${REPO_REF} not found — staying on default branch"
     fi
   fi
+fi
+
+# ─── Orient claude to the /workspace layout ──────────────────────
+# /workspace/CLAUDE.md tells claude "the codebase is in ./repo —
+# don't touch .mcp.json or .claude/ here, those are worker plumbing."
+# Written on every boot since it's a static reference, but only if
+# absent so the operator can override by writing their own.
+CLAUDE_MD="/workspace/CLAUDE.md"
+if [ ! -f "${CLAUDE_MD}" ]; then
+  REPO_DIR_REL="${REPO_DIR_NAME:-repo}"
+  cat > "${CLAUDE_MD}" <<EOF
+# Worker container layout
+
+You are running inside a clawborrator worker_v1 docker container.
+Your current working directory is \`/workspace\`, but **the actual
+codebase you are here to work on is in \`./${REPO_DIR_REL}/\`**.
+
+For most operations:
+
+- \`cd ${REPO_DIR_REL}\` first, or use \`git -C ${REPO_DIR_REL} …\`
+- Reference repo files as \`${REPO_DIR_REL}/path/to/file\` from
+  this cwd, or as relative paths after \`cd\`-ing in.
+
+Files at the \`/workspace/\` level are worker plumbing and should
+not be modified or committed anywhere:
+
+- \`.mcp.json\` — clawborrator MCP server config.
+- \`.claude/\` — project-level hooks, settings.local, MCP plugin state.
+- \`CLAUDE.md\` — this file.
+
+Anything under \`/workspace/${REPO_DIR_REL}/\` is fair game and is
+what the operator expects you to read, edit, and commit.
+
+## Spawning sibling workers (swarm pattern)
+
+If \`docker --version\` works in your Bash tool, this container has
+the Docker socket mounted and you can spawn sibling worker containers
+on the same Docker host. Use the helper scripts (preferred) — they
+inherit credentials and config from this worker's env so you don't
+have to remember the docker run incantation:
+
+\`\`\`bash
+# Spawn one sibling to do a specific subtask:
+spawn-worker --role "test-writer-foo" \\
+             --initial-prompt "Write a Jest test for ${REPO_DIR_REL}/src/components/Foo.tsx. Commit on branch test-foo. Reply when done."
+# → SPAWN_OK container=worker-test-writer-foo-1747059823 routing=@workspace-2626a003
+
+# The child shows up in mcp__clawborrator__list_peers under that routing name
+# within ~10–15s. Dispatch work to it with mcp__clawborrator__route_to_peer.
+
+# Clean up when done:
+terminate-worker @workspace-2626a003           # by routing name
+terminate-worker worker-test-writer-foo-…      # OR by container name
+\`\`\`
+
+\`spawn-worker --help\` shows the full flag set. By default each child
+inherits the SAME repo, credentials, and hub config as this worker.
+Override per-child with \`--repo-url\`, \`--repo-ref\`, \`--no-clone\`,
+\`--env KEY=VAL\` (repeatable), \`--wait <seconds>\`.
+
+**When to use the swarm pattern:**
+- The task naturally parallelizes (N independent files, N repos, N branches).
+- You want a child to operate in a sandboxed copy without polluting your own context.
+- A subtask is expensive enough that running it in parallel saves wall-clock time.
+
+**When NOT to use:**
+- The task is small enough to do here directly — spawning is ~15s overhead per child + Docker memory cost.
+- You're not sure exactly what the children should do — spawn workers with vague prompts and they'll burn quota idling.
+- You only need a one-off answer — \`mcp__clawborrator__probe_peers\` against existing peers is cheaper.
+
+**Patterns that work well:**
+- Fan-out: \`for f in ./files; do spawn-worker --role "process-\$f" --initial-prompt "do X to \$f"; done\` — then aggregate via peer reports.
+- Cap-in-flight: before each new spawn, check \`list_peers\` and only spawn if active children < cap.
+- Self-cleanup: instruct each child to commit + push + exit on completion; you watch for the peer report and call \`terminate-worker\`.
+
+If you spawn workers and run out of work, kill them — every running child is consuming Anthropic quota.
+EOF
+  echo "[worker] wrote ${CLAUDE_MD}"
 fi
 
 # ─── Optional clawborrator integration ───────────────────────────

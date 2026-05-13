@@ -34,9 +34,33 @@ RUN npm install -g \
         @anthropic-ai/claude-code \
         clawborrator-cli
 
+# Docker CLI (client only, no daemon). Enables the "Docker outside of
+# Docker" pattern: when /var/run/docker.sock is bind-mounted in, the
+# worker can spawn sibling containers on the host daemon. Pinned to a
+# specific version for reproducible builds; bump as needed. The
+# tarball ships static binaries — just pull out the client.
+#
+# Security caveat: mounting docker.sock = root on host. Only do it
+# when you want the swarm pattern. See README.
+ARG DOCKER_CLI_VERSION=27.4.0
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      | tar -xz -C /tmp \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker \
+    && docker --version
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY claude-with-autoenter.expect /usr/local/bin/claude-with-autoenter.expect
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/claude-with-autoenter.expect
+# Swarm-orchestration helpers. Only meaningful in workers that have
+# /var/run/docker.sock mounted in (see compose); they shell out to
+# the `docker` CLI installed above. Always available on PATH so
+# claude doesn't have to hunt for them.
+COPY spawn-worker.sh /usr/local/bin/spawn-worker
+COPY terminate-worker.sh /usr/local/bin/terminate-worker
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+             /usr/local/bin/claude-with-autoenter.expect \
+             /usr/local/bin/spawn-worker \
+             /usr/local/bin/terminate-worker
 
 # Non-root identity. Claude Code's --dangerously-skip-permissions
 # refuses to run as root ("for security reasons"), so when
@@ -67,6 +91,11 @@ WORKDIR /workspace
 #   CLAWBORRATOR_HUB_URL         optional — default wss://next.clawborrator.com
 #   REPO_URL                     optional — git clone into /workspace on first run
 #   REPO_REF                     optional — branch / tag / sha to checkout after clone
+#   REPO_PAT                     optional — PAT spliced into REPO_URL for private clones
+#   REPO_PAT_USER                optional — username paired with REPO_PAT (default x-access-token)
+#   REPO_DIR_NAME                optional — subdir under /workspace for the clone (default `repo`)
+#   GIT_USER_EMAIL               optional — `git config --global user.email` for commits inside the worker
+#   GIT_USER_NAME                optional — `git config --global user.name`  for commits inside the worker
 #   CLAUDE_SKIP_PERMISSIONS      optional — "1" to pass --dangerously-skip-permissions
 #                                          (only safe in a sandboxed/throwaway container)
 #   CLAUDE_INITIAL_PROMPT        optional — single prompt to feed claude on startup

@@ -15,6 +15,23 @@ services:
     # named volume in production if you don't need host-side access.
     volumes:
       - ./workspace:/workspace
+      # Named volume for /home/worker/.claude. Persists the worker's
+      # own OAuth credential chain across restarts so claude can
+      # maintain its own refresh-token rotation — the .env-supplied
+      # tokens are a first-boot seed, after which the worker rewrites
+      # .credentials.json itself when Anthropic refreshes. Without
+      # this volume, every restart clobbers the freshly-rotated
+      # tokens with the (now-stale) values from .env and claude 401s.
+      - claude-home:/home/worker/.claude
+      # Host's Docker socket — enables the worker to spawn sibling
+      # workers on the same host ("Docker outside of Docker" pattern).
+      # Mount only when you want the swarm primitive; OMIT for any
+      # worker that doesn't need to spawn (most of them). Mounting
+      # this socket gives the container root-equivalent access to the
+      # host's Docker daemon — anything inside can mount /, run
+      # privileged containers, escape the sandbox. Treat as a
+      # production-blocking caveat; fine for local dev.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       ANTHROPIC_ACCESS_TOKEN:     "${ANTHROPIC_ACCESS_TOKEN}"
       ANTHROPIC_REFRESH_TOKEN:    "${ANTHROPIC_REFRESH_TOKEN:-}"
@@ -25,6 +42,11 @@ services:
       CLAWBORRATOR_HUB_URL:       "${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}"
       REPO_URL:                   "${REPO_URL:-}"
       REPO_REF:                   "${REPO_REF:-}"
+      REPO_PAT:                   "${REPO_PAT:-}"
+      REPO_PAT_USER:              "${REPO_PAT_USER:-x-access-token}"
+      REPO_DIR_NAME:              "${REPO_DIR_NAME:-repo}"
+      GIT_USER_EMAIL:             "${GIT_USER_EMAIL:-}"
+      GIT_USER_NAME:              "${GIT_USER_NAME:-}"
       CLAUDE_SKIP_PERMISSIONS:    "${CLAUDE_SKIP_PERMISSIONS:-0}"
       CLAUDE_INITIAL_PROMPT:      "${CLAUDE_INITIAL_PROMPT:-}"
     # claude is interactive when CLAWBORRATOR_TOKEN is set (operators
@@ -33,3 +55,13 @@ services:
     # exits naturally), these are harmless.
     stdin_open: true
     tty: true
+
+# Top-level volumes declaration — `claude-home` is a docker-managed
+# named volume (no host-side path leak) used to persist the worker's
+# OAuth credential chain across container restarts. See the volume
+# comment in the `worker` service for the rationale. Inspect with
+# `docker volume inspect worker_v1_claude-home`; nuke with
+# `docker volume rm worker_v1_claude-home` (forces fresh seed from
+# .env on next boot).
+volumes:
+  claude-home:
