@@ -1,0 +1,10 @@
+# Don't ship anything that isn't part of the image build context.
+# .env carries secrets; workspace/ is host-side state; node_modules
+# isn't relevant (we npm-install inside the image).
+
+.env
+workspace
+node_modules
+.git
+.gitignore
+README.md

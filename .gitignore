@@ -1,0 +1,4 @@
+# Local-only state — never commit. .env carries an
+# ANTHROPIC_API_KEY + a channel token; both are secrets.
+.env
+workspace/

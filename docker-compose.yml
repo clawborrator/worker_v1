@@ -1,0 +1,35 @@
+# Convenience wrapper for local dev — `docker compose up` reads .env
+# (copy from .env.example), builds the image, and runs one worker
+# mounted at ./workspace on the host.
+#
+# Production usage probably wants a different orchestrator (Fly, k8s,
+# nomad, ECS) — this file is the "I want to try it on my laptop in
+# under a minute" path.
+
+services:
+  worker:
+    build: .
+    image: clawborrator-worker:latest
+    # Bind-mount the host's ./workspace so file edits persist across
+    # container restarts and survive a `docker compose down`. Use a
+    # named volume in production if you don't need host-side access.
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      ANTHROPIC_ACCESS_TOKEN:     "${ANTHROPIC_ACCESS_TOKEN}"
+      ANTHROPIC_REFRESH_TOKEN:    "${ANTHROPIC_REFRESH_TOKEN:-}"
+      ANTHROPIC_TOKEN_EXPIRES_AT: "${ANTHROPIC_TOKEN_EXPIRES_AT:-}"
+      ANTHROPIC_SUBSCRIPTION_TYPE: "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}"
+      ANTHROPIC_RATE_LIMIT_TIER:  "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}"
+      CLAWBORRATOR_TOKEN:         "${CLAWBORRATOR_TOKEN:-}"
+      CLAWBORRATOR_HUB_URL:       "${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}"
+      REPO_URL:                   "${REPO_URL:-}"
+      REPO_REF:                   "${REPO_REF:-}"
+      CLAUDE_SKIP_PERMISSIONS:    "${CLAUDE_SKIP_PERMISSIONS:-0}"
+      CLAUDE_INITIAL_PROMPT:      "${CLAUDE_INITIAL_PROMPT:-}"
+    # claude is interactive when CLAWBORRATOR_TOKEN is set (operators
+    # drive it via the hub); stdin_open + tty give it a real terminal.
+    # If you're running pure batch (CLAUDE_INITIAL_PROMPT + claude
+    # exits naturally), these are harmless.
+    stdin_open: true
+    tty: true

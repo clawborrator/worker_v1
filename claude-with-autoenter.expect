@@ -1,0 +1,60 @@
+#!/usr/bin/expect -f
+# Spawns `claude` and auto-accepts the only startup prompt the
+# worker can't pre-resolve via settings.json:
+#
+#   WARNING: Loading development channels
+#   --dangerously-load-development-channels is for local channel
+#   development only. Do not use this option to run channels you
+#   have downloaded off the internet.
+#   ❯ 1. I am using this for local development
+#     2. Exit
+#
+# This shows up on every spawn that passes the
+# --dangerously-load-development-channels flag (needed for inbound
+# clawborrator routed prompts). desktop_v1's supervisor handles it
+# via a vt100 parser plugin; we do the same here with expect.
+#
+# After the prompt is dismissed, we `interact` so the operator's
+# TTY (and any in-band channel notifications via the MCP) flow
+# through normally. Single-fire — won't fight the operator if the
+# prompt doesn't appear (the warning text isn't matched once we're
+# past it).
+
+set timeout 30
+log_user 1
+
+# Pass all args through to claude.
+eval spawn claude $argv
+
+# Match the dev-channels warning. Ink renders the prompt with ANSI
+# SGR + per-column move sequences interleaved between words (e.g.
+# "I[1Cam[1Cusing[1Cthis[1Cfor[1Clocal[1Cdevelopment"), so we
+# can't use a literal multi-word string. Pick a single word that
+# survives the interleaving — "development" appears clean inside
+# both "development channels" header and "for local development"
+# option-1 row. First match wins; second occurrence is harmless.
+#
+# 30s timeout sends Enter blindly as a fallback in case Ink's
+# render skipped the recognizable word for some reason. After the
+# warning is dismissed, the worker has nothing else to auto-answer.
+expect {
+  -re "development" {
+    sleep 0.2
+    send "\r"
+  }
+  timeout {
+    # Belt-and-suspenders: try Enter anyway in case the match
+    # missed. Worst case it's a no-op against the prompt itself.
+    send "\r"
+  }
+  eof {
+    catch wait result
+    exit [lindex $result 3]
+  }
+}
+
+# Hand the PTY back. From this point onward, stdin and stdout are
+# directly wired to claude — channel-MCP notifications still arrive
+# in-band, the operator can type at the prompt if they exec into
+# the container, etc.
+interact
