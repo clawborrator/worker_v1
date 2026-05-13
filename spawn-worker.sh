@@ -28,6 +28,14 @@
 #   ANTHROPIC_RATE_LIMIT_TIER, REPO_URL, REPO_REF, REPO_PAT,
 #   REPO_PAT_USER, REPO_DIR_NAME, CLAUDE_SKIP_PERMISSIONS,
 #   GIT_USER_EMAIL, GIT_USER_NAME
+#
+# Always set on the child (no opt-out — spawn-worker's identity is
+# "ephemeral helper"; if you want a persistent worker, use
+# `docker run` directly):
+#   CLAWBORRATOR_EPHEMERAL=1   — child's session row is fully
+#                                deleted by the hub when its WS
+#                                closes (via the new sessions.
+#                                delete_on_disconnect flag).
 
 set -e
 
@@ -108,7 +116,8 @@ set -- \
   -e "REPO_PAT=${REPO_PAT:-}" \
   -e "REPO_PAT_USER=${REPO_PAT_USER:-x-access-token}" \
   -e "GIT_USER_EMAIL=${GIT_USER_EMAIL:-}" \
-  -e "GIT_USER_NAME=${GIT_USER_NAME:-}"
+  -e "GIT_USER_NAME=${GIT_USER_NAME:-}" \
+  -e "CLAWBORRATOR_EPHEMERAL=1"
 
 # ─── Run ──────────────────────────────────────────────────────
 # -d -it: detached + interactive PTY. The expect wrapper inside
