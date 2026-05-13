@@ -203,8 +203,35 @@ If you're running behind a strict egress firewall, allow at minimum
 
 ## Operating mid-flight
 
-Inside the container (`docker exec -it <id> bash`), the `claw` CLI
-is available globally:
+### Attach to the running Claude Code TUI
+
+`docker attach` hooks your terminal up to the foreground `claude`
+process (running under the expect wrapper). You see whatever
+the worker sees and type directly into the prompt:
+
+```bash
+docker attach --detach-keys="ctrl-p,ctrl-q" worker_v1-worker-1
+```
+
+- **`--detach-keys`** lets you leave without killing claude — press
+  `Ctrl-P` then `Ctrl-Q`. Pick something you won't fat-finger.
+  Without it, the default detach combo is the same but it's worth
+  passing explicitly so you remember.
+- **`Ctrl-C` kills claude** (and exits the container) — `attach` is
+  a real TTY hookup, not a viewer. Use the detach keys.
+- Multiple attaches share one input stream. Two people typing at
+  once will fight. For multi-operator drive, route through the hub
+  (`@workspace`, etc.) instead — that's the whole point of the
+  clawborrator integration.
+
+### Side shell (doesn't touch the TUI)
+
+```bash
+docker exec -it worker_v1-worker-1 bash
+```
+
+Opens a fresh bash in the container without disturbing the running
+`claude` process. The `claw` CLI is available globally:
 
 ```bash
 # inside the running worker
@@ -213,9 +240,12 @@ claw session ls
 claw session info <id>
 ```
 
-For an operator on the outside, the worker's session shows up in
-orchard-chat under their hub session list (once they're signed
-into the same hub the channel token was minted on).
+### Drive from outside the host
+
+The worker's session shows up in orchard-chat under your hub
+session list (once you're signed into the same hub the channel
+token was minted on). This is the recommended path — no SSH, no
+`docker attach`, multi-operator-safe.
 
 ---
 
