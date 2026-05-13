@@ -79,13 +79,19 @@ RUN useradd --create-home --uid 1001 --shell /bin/bash worker && \
 WORKDIR /workspace
 
 # Environment contract (full doc in README.md):
-#   ANTHROPIC_ACCESS_TOKEN       required — OAuth access token (sk-ant-oat01-…);
-#                                          written into ~/.claude/.credentials.json
+#   ANTHROPIC_API_KEY            one of two — raw API key (sk-ant-api03-…); used
+#                                          directly by claude (no credentials.json).
+#                                          Bills against API account, not Max.
+#   ANTHROPIC_ACCESS_TOKEN       one of two — OAuth access token (sk-ant-oat01-…);
+#                                          written into ~/.claude/.credentials.json.
+#                                          Bills against Max subscription.
 #   ANTHROPIC_REFRESH_TOKEN      optional — refresh token (sk-ant-ort01-…);
 #                                          required for auto-renewal of long-lived workers
 #   ANTHROPIC_TOKEN_EXPIRES_AT   optional — unix ms expiry; defaults far-future
 #   ANTHROPIC_SUBSCRIPTION_TYPE  optional — default "max"
 #   ANTHROPIC_RATE_LIMIT_TIER    optional — default "default_claude_max_20x"
+#   MODEL                        optional — opus | sonnet | haiku (default haiku);
+#                                          entrypoint exports ANTHROPIC_MODEL with full id
 #   CLAWBORRATOR_TOKEN           optional — ck_live_… channel token; if set,
 #                                          the worker registers with the hub
 #   CLAWBORRATOR_HUB_URL         optional — default wss://next.clawborrator.com

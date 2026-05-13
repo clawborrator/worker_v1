@@ -35,69 +35,86 @@ WORKER_HOME="/home/${WORKER_USER}"
 if [ "$(id -u)" = "0" ]; then
 
   # ─── Required env ──────────────────────────────────────────────
-  if [ -z "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
-    echo "[worker] ANTHROPIC_ACCESS_TOKEN is required — Claude Code reads it from" >&2
-    echo "         ~/.claude/.credentials.json to call the model API." >&2
-    echo "         Pull yours from your local Claude Code install:" >&2
-    echo "           cat ~/.claude/.credentials.json | jq '.claudeAiOauth.accessToken'" >&2
-    exit 1
-  fi
-
-  # ─── Write OAuth credentials file ──────────────────────────────
-  # Schema mirrors what `claude` writes after an interactive OAuth
-  # login: a single `claudeAiOauth` block. We use jq (apt-installed)
-  # to bind secrets as parameters rather than splicing them into a
-  # heredoc — no risk of malformed JSON if a token has an odd char.
+  # Two auth paths, in order of preference:
+  #   1. ANTHROPIC_API_KEY  — sk-ant-api03-… raw API key. Claude
+  #      Code reads it directly from env; no .credentials.json
+  #      needed. Simplest, doesn't rotate, doesn't share a refresh
+  #      chain with any other process. Billed against the API
+  #      account (NOT the Max subscription).
+  #   2. ANTHROPIC_ACCESS_TOKEN  — sk-ant-oat01-… OAuth access
+  #      token from a Claude Max account. Entrypoint seeds
+  #      ~/.claude/.credentials.json from env on first boot;
+  #      claude refreshes the token chain itself thereafter via
+  #      the persisted volume. Bills against the Max subscription.
   #
-  # Defaults:
-  #   - refreshToken: empty. Without it, no auto-renewal; long-
-  #     running workers fail when the access token expires (~14d).
-  #   - expiresAt: 9999999999999 (far future) so claude doesn't
-  #     proactively refresh on a stale-looking timestamp.
-  #   - scopes: the full Claude-Code-issued set.
-  #   - subscriptionType + rateLimitTier: match Claude Max.
+  # Exactly one is required. If ANTHROPIC_API_KEY is set we skip
+  # the OAuth credentials seeding entirely — the API key path
+  # doesn't need a .credentials.json file at all.
   CREDS_DIR="${WORKER_HOME}/.claude"
   CREDS_FILE="${CREDS_DIR}/.credentials.json"
   GLOBAL_CFG="${WORKER_HOME}/.claude.json"
   SETTINGS_FILE="${CREDS_DIR}/settings.json"
   mkdir -p "${CREDS_DIR}"
 
-  # ─── First-boot credential seed (idempotent skip on persisted volume) ───
-  # When ${WORKER_HOME}/.claude is a docker named volume, the file
-  # survives container restart. Claude Code rewrites .credentials.json
-  # itself whenever it refreshes the OAuth token chain, so the .env-
-  # supplied tokens are only a first-boot seed. Overwriting on every
-  # boot would destroy the freshly-refreshed credentials that the
-  # in-container claude has been maintaining — exactly the host/
-  # container token-sharing failure that motivated this volume in
-  # the first place.
-  if [ -f "${CREDS_FILE}" ]; then
-    echo "[worker] ${CREDS_FILE} already present — keeping (worker maintains its own OAuth chain)"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    # API key path — nothing to seed on disk. Claude Code reads
+    # ANTHROPIC_API_KEY directly from env at startup. We still
+    # need ~/.claude/ to exist (for project state, hooks,
+    # settings.local) but the credentials file isn't part of it.
+    echo "[worker] using ANTHROPIC_API_KEY (raw API auth — bills against API account, not Max)"
+  elif [ -n "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
+    # ─── Write OAuth credentials file ──────────────────────────────
+    # Schema mirrors what `claude` writes after an interactive OAuth
+    # login: a single `claudeAiOauth` block. jq binds secrets as
+    # parameters so a token with an odd char can't break the JSON.
+    #
+    # First-boot seed only — when ${WORKER_HOME}/.claude is a
+    # docker named volume, the file survives container restart.
+    # Claude Code rewrites .credentials.json itself whenever it
+    # refreshes the OAuth token chain; overwriting on every boot
+    # would destroy the freshly-refreshed credentials.
+    #
+    # Defaults:
+    #   - refreshToken: empty. Without it, no auto-renewal.
+    #   - expiresAt: 9999999999999 (far future) so claude doesn't
+    #     proactively refresh on a stale-looking timestamp.
+    #   - scopes: the full Claude-Code-issued set.
+    #   - subscriptionType + rateLimitTier: match Claude Max.
+    if [ -f "${CREDS_FILE}" ]; then
+      echo "[worker] ${CREDS_FILE} already present — keeping (worker maintains its own OAuth chain)"
+    else
+      jq -n \
+        --arg at   "${ANTHROPIC_ACCESS_TOKEN}" \
+        --arg rt   "${ANTHROPIC_REFRESH_TOKEN:-}" \
+        --argjson exp "${ANTHROPIC_TOKEN_EXPIRES_AT:-9999999999999}" \
+        --arg sub  "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}" \
+        --arg tier "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}" \
+        '{
+          claudeAiOauth: {
+            accessToken:      $at,
+            refreshToken:     $rt,
+            expiresAt:        $exp,
+            scopes: [
+              "user:file_upload",
+              "user:inference",
+              "user:mcp_servers",
+              "user:profile",
+              "user:sessions:claude_code"
+            ],
+            subscriptionType: $sub,
+            rateLimitTier:    $tier
+          }
+        }' > "${CREDS_FILE}"
+      chmod 600 "${CREDS_FILE}"
+      echo "[worker] seeded ${CREDS_FILE} from env (claudeAiOauth, subscription=${ANTHROPIC_SUBSCRIPTION_TYPE:-max})"
+    fi
   else
-    jq -n \
-      --arg at   "${ANTHROPIC_ACCESS_TOKEN}" \
-      --arg rt   "${ANTHROPIC_REFRESH_TOKEN:-}" \
-      --argjson exp "${ANTHROPIC_TOKEN_EXPIRES_AT:-9999999999999}" \
-      --arg sub  "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}" \
-      --arg tier "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}" \
-      '{
-        claudeAiOauth: {
-          accessToken:      $at,
-          refreshToken:     $rt,
-          expiresAt:        $exp,
-          scopes: [
-            "user:file_upload",
-            "user:inference",
-            "user:mcp_servers",
-            "user:profile",
-            "user:sessions:claude_code"
-          ],
-          subscriptionType: $sub,
-          rateLimitTier:    $tier
-        }
-      }' > "${CREDS_FILE}"
-    chmod 600 "${CREDS_FILE}"
-    echo "[worker] seeded ${CREDS_FILE} from env (claudeAiOauth, subscription=${ANTHROPIC_SUBSCRIPTION_TYPE:-max})"
+    echo "[worker] either ANTHROPIC_API_KEY or ANTHROPIC_ACCESS_TOKEN is required" >&2
+    echo "         API key:    set ANTHROPIC_API_KEY=sk-ant-api03-…" >&2
+    echo "         OAuth (Max): set ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…" >&2
+    echo "                      (pull from your local install:" >&2
+    echo "                      cat ~/.claude/.credentials.json | jq '.claudeAiOauth.accessToken')" >&2
+    exit 1
   fi
 
   # ─── Pre-seed Claude Code onboarding state (first boot only) ───
@@ -216,6 +233,35 @@ fi
 if [ -n "${GIT_USER_EMAIL:-}" ] || [ -n "${GIT_USER_NAME:-}" ]; then
   echo "[worker] git identity: ${GIT_USER_NAME:-(unset)} <${GIT_USER_EMAIL:-(unset)}>"
 fi
+
+# ─── Model selection ──────────────────────────────────────────
+# MODEL accepts the friendly aliases opus | sonnet | haiku and
+# translates to the explicit model ID via ANTHROPIC_MODEL. Anything
+# else is passed through verbatim, so operators can pin to an
+# exact version if they want. Default haiku — cheap fast model
+# right for most worker-pool workloads.
+#
+# Export so claude (the child process) inherits ANTHROPIC_MODEL.
+case "${MODEL:-haiku}" in
+  opus)
+    export ANTHROPIC_MODEL=claude-opus-4-7
+    ;;
+  sonnet)
+    export ANTHROPIC_MODEL=claude-sonnet-4-6
+    ;;
+  haiku)
+    export ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+    ;;
+  "")
+    export ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+    ;;
+  *)
+    # Pass through full IDs untouched (e.g., a future
+    # `claude-opus-5-0` or a snapshot ID).
+    export ANTHROPIC_MODEL="${MODEL}"
+    ;;
+esac
+echo "[worker] model: ${MODEL:-haiku} (ANTHROPIC_MODEL=${ANTHROPIC_MODEL})"
 
 # ─── Optional repo clone ─────────────────────────────────────────
 # Claude's cwd is /workspace, NOT the cloned repo. We clone one
@@ -388,11 +434,19 @@ if [ "${CLAUDE_SKIP_PERMISSIONS:-0}" = "1" ]; then
   FLAGS="${FLAGS} --dangerously-skip-permissions"
 fi
 
+# When ANTHROPIC_API_KEY is set, claude shows a "Do you want to use
+# this API key?" prompt with default = "No (recommended)". A
+# headless worker can't answer it, so we use the expect wrapper
+# (it handles BOTH the API-key prompt and the dev-channels one).
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  USE_EXPECT_WRAPPER=1
+fi
+
 # ─── Launch ──────────────────────────────────────────────────────
-# When the dangerously-load-development-channels flag is on (the
-# clawborrator path), wrap claude in an expect script that
-# auto-accepts the dev-channels warning prompt. Standalone runs
-# skip the wrapper since there's no prompt to dismiss.
+# Wrap claude in the expect script when there are startup prompts
+# we need to auto-dismiss (dev-channels warning, API-key approval).
+# Standalone OAuth runs without clawborrator skip the wrapper since
+# there's no prompt to dismiss.
 if [ "${USE_EXPECT_WRAPPER:-0}" = "1" ]; then
   LAUNCHER="/usr/local/bin/claude-with-autoenter.expect"
 else

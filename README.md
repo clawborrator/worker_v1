@@ -80,16 +80,26 @@ docker run --rm -it --env-file .env -v "$(pwd)/workspace:/workspace" \
 
 ## Authentication
 
-This image uses **OAuth credentials** (Claude Max subscription
-flow), NOT a raw API key. The entrypoint seeds a standard
-`~/.claude/.credentials.json` file on **first boot only** from your
-env vars, matching the shape Claude Code creates after an interactive
-`claude` login.
+Two auth paths are supported; pick whichever fits your billing model.
 
-Minimum: `ANTHROPIC_ACCESS_TOKEN`. Strongly recommended:
-`ANTHROPIC_REFRESH_TOKEN` too — without it, the worker can't
-auto-renew when the access token expires (~14 days), and you'll
-get auth failures.
+### Path A — `ANTHROPIC_API_KEY` (recommended for headless workers)
+
+Set `ANTHROPIC_API_KEY=sk-ant-api03-…` and you're done. Claude Code
+reads the key directly from env; the entrypoint skips the
+`.credentials.json` materialization entirely. No rotation, no
+refresh-token chain, no host/container sharing problem. Bills
+against your Anthropic API account (per-token metered).
+
+Get a key from <https://console.anthropic.com/settings/keys>.
+
+### Path B — Claude Max OAuth (subscription billing)
+
+Set `ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…` and (recommended)
+`ANTHROPIC_REFRESH_TOKEN=sk-ant-ort01-…`. The entrypoint seeds a
+standard `~/.claude/.credentials.json` file on **first boot only**,
+matching the shape Claude Code creates after an interactive `claude`
+login. Claude refreshes the token chain itself thereafter (the
+`claude-home` named volume persists the chain across restarts).
 
 Optional fine-tuning: `ANTHROPIC_TOKEN_EXPIRES_AT` (unix ms),
 `ANTHROPIC_SUBSCRIPTION_TYPE` (default `max`),
@@ -99,6 +109,18 @@ The materialized credentials file lives at
 `/home/worker/.claude/.credentials.json` inside the container with
 mode `0600`. Anyone with shell access to the container can read it;
 treat container access as token-equivalent.
+
+**Warning about Path B**: Anthropic's refresh tokens are single-use.
+When either side (host or worker) refreshes, the other's copy of
+the refresh token is invalidated. Don't share host tokens with a
+long-running worker; mint a worker-dedicated credential (see
+*Credentials persistence* below) or use Path A instead.
+
+### Picking between them
+
+Set ANTHROPIC_API_KEY for Path A, leave it blank and set
+ANTHROPIC_ACCESS_TOKEN for Path B. **Exactly one must be set**;
+the entrypoint exits with a clear error if neither is provided.
 
 ### Credentials persistence (named volume)
 
@@ -193,7 +215,8 @@ that file rather than memorizing the table below.
 
 | Var | Required? | Default | Notes |
 |---|---|---|---|
-| `ANTHROPIC_ACCESS_TOKEN` | yes | — | OAuth access token (`sk-ant-oat01-…`); written into `~/.claude/.credentials.json`. |
+| `ANTHROPIC_API_KEY` | one of two | — | Raw API key (`sk-ant-api03-…`); used directly by claude, no `.credentials.json`. Bills against API account. Set this OR `ANTHROPIC_ACCESS_TOKEN`. |
+| `ANTHROPIC_ACCESS_TOKEN` | one of two | — | Claude Max OAuth access token (`sk-ant-oat01-…`); seeded into `~/.claude/.credentials.json` on first boot. Bills against Max subscription. |
 | `ANTHROPIC_REFRESH_TOKEN` | recommended | empty | Refresh token (`sk-ant-ort01-…`). Without it, no auto-renewal — long-lived workers will fail when the access token expires. |
 | `ANTHROPIC_TOKEN_EXPIRES_AT` | no | far-future | Unix ms expiry. |
 | `ANTHROPIC_SUBSCRIPTION_TYPE` | no | `max` | Subscription label. |

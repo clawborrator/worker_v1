@@ -14,6 +14,10 @@
 #   --repo-ref <ref>           override REPO_REF
 #   --repo-dir-name <dir>      override REPO_DIR_NAME
 #   --no-clone                 force-disable the clone for this child
+#   --model <opus|sonnet|haiku|full-id>
+#                              override MODEL for this child (default:
+#                              whatever the parent has, falling back
+#                              to MODEL=haiku at the child's entrypoint)
 #   --env KEY=VAL              repeatable; ad-hoc env addition
 #   --wait <seconds>           poll the hub until the child appears
 #                              (default 30; 0 to skip)
@@ -23,11 +27,14 @@
 #
 # Inherited from parent env (no flag needed):
 #   CLAWBORRATOR_TOKEN, CLAWBORRATOR_HUB_URL,
+#   ANTHROPIC_API_KEY,
 #   ANTHROPIC_ACCESS_TOKEN, ANTHROPIC_REFRESH_TOKEN,
 #   ANTHROPIC_TOKEN_EXPIRES_AT, ANTHROPIC_SUBSCRIPTION_TYPE,
 #   ANTHROPIC_RATE_LIMIT_TIER, REPO_URL, REPO_REF, REPO_PAT,
 #   REPO_PAT_USER, REPO_DIR_NAME, CLAUDE_SKIP_PERMISSIONS,
-#   GIT_USER_EMAIL, GIT_USER_NAME
+#   GIT_USER_EMAIL, GIT_USER_NAME, MODEL
+# (Whichever of API_KEY / ACCESS_TOKEN is unset in parent is just
+# an empty string, so children pick the same auth path as parent.)
 #
 # Always set on the child (no opt-out — spawn-worker's identity is
 # "ephemeral helper"; if you want a persistent worker, use
@@ -47,6 +54,7 @@ INITIAL_PROMPT=""
 OVERRIDE_REPO_URL=""
 OVERRIDE_REPO_REF=""
 OVERRIDE_REPO_DIR_NAME=""
+OVERRIDE_MODEL=""
 NO_CLONE=0
 WAIT_SECONDS=30
 EXTRA_ENVS=""
@@ -58,6 +66,7 @@ while [ $# -gt 0 ]; do
     --repo-url)        OVERRIDE_REPO_URL="$2"; shift 2 ;;
     --repo-ref)        OVERRIDE_REPO_REF="$2"; shift 2 ;;
     --repo-dir-name)   OVERRIDE_REPO_DIR_NAME="$2"; shift 2 ;;
+    --model)           OVERRIDE_MODEL="$2"; shift 2 ;;
     --no-clone)        NO_CLONE=1; shift ;;
     --env)             EXTRA_ENVS="${EXTRA_ENVS} -e $2"; shift 2 ;;
     --wait)            WAIT_SECONDS="$2"; shift 2 ;;
@@ -91,6 +100,7 @@ fi
 EFFECTIVE_REPO_URL="${OVERRIDE_REPO_URL:-${REPO_URL:-}}"
 EFFECTIVE_REPO_REF="${OVERRIDE_REPO_REF:-${REPO_REF:-}}"
 EFFECTIVE_REPO_DIR_NAME="${OVERRIDE_REPO_DIR_NAME:-${REPO_DIR_NAME:-repo}}"
+EFFECTIVE_MODEL="${OVERRIDE_MODEL:-${MODEL:-haiku}}"
 if [ "${NO_CLONE}" = "1" ]; then
   EFFECTIVE_REPO_URL=""
 fi
@@ -103,6 +113,7 @@ fi
 set -- \
   -e "CLAWBORRATOR_TOKEN=${CLAWBORRATOR_TOKEN:-}" \
   -e "CLAWBORRATOR_HUB_URL=${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}" \
+  -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
   -e "ANTHROPIC_ACCESS_TOKEN=${ANTHROPIC_ACCESS_TOKEN:-}" \
   -e "ANTHROPIC_REFRESH_TOKEN=${ANTHROPIC_REFRESH_TOKEN:-}" \
   -e "ANTHROPIC_TOKEN_EXPIRES_AT=${ANTHROPIC_TOKEN_EXPIRES_AT:-}" \
@@ -117,6 +128,7 @@ set -- \
   -e "REPO_PAT_USER=${REPO_PAT_USER:-x-access-token}" \
   -e "GIT_USER_EMAIL=${GIT_USER_EMAIL:-}" \
   -e "GIT_USER_NAME=${GIT_USER_NAME:-}" \
+  -e "MODEL=${EFFECTIVE_MODEL}" \
   -e "CLAWBORRATOR_EPHEMERAL=1"
 
 # ─── Run ──────────────────────────────────────────────────────

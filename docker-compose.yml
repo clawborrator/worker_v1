@@ -33,11 +33,13 @@ services:
       # production-blocking caveat; fine for local dev.
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      ANTHROPIC_ACCESS_TOKEN:     "${ANTHROPIC_ACCESS_TOKEN}"
+      ANTHROPIC_API_KEY:          "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_ACCESS_TOKEN:     "${ANTHROPIC_ACCESS_TOKEN:-}"
       ANTHROPIC_REFRESH_TOKEN:    "${ANTHROPIC_REFRESH_TOKEN:-}"
       ANTHROPIC_TOKEN_EXPIRES_AT: "${ANTHROPIC_TOKEN_EXPIRES_AT:-}"
       ANTHROPIC_SUBSCRIPTION_TYPE: "${ANTHROPIC_SUBSCRIPTION_TYPE:-max}"
       ANTHROPIC_RATE_LIMIT_TIER:  "${ANTHROPIC_RATE_LIMIT_TIER:-default_claude_max_20x}"
+      MODEL:                      "${MODEL:-haiku}"
       CLAWBORRATOR_TOKEN:         "${CLAWBORRATOR_TOKEN:-}"
       CLAWBORRATOR_HUB_URL:       "${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}"
       REPO_URL:                   "${REPO_URL:-}"
