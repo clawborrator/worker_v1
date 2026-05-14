@@ -1,83 +1,70 @@
 #!/usr/bin/expect -f
-# Auto-accept the two startup prompts a headless worker can't
-# resolve via settings.json:
+# Auto-dismiss the API-key prompt (and the dev-channels prompt if
+# it fires) on claude startup, then hand the PTY back.
 #
-#   1. "Do you want to use this API key?"
-#      (Fires only when ANTHROPIC_API_KEY is set in env, asking the
-#      user to opt in to using the env-provided key. Default-cursor
-#      is on "No (recommended)", so we send Up + Enter to pick "Yes".)
+# Single-expect design via `exp_continue`: keep matching prompts as
+# they appear until we see the "Welcome" banner that means claude
+# is past bootstrap. No fixed wait-for-second-prompt timeout tax.
 #
-#      ┌─────────────────────────────────────────┐
-#      │ Do you want to use this API key?        │
-#      │                                         │
-#      │   1. Yes                                │
-#      │ ❯ 2. No (recommended)                   │
-#      └─────────────────────────────────────────┘
+# Two prompts handled:
 #
-#   2. "WARNING: Loading development channels"
-#      (Fires only when --dangerously-load-development-channels is
-#      passed. Default-cursor is on option 1 — what we want — so
-#      Enter alone confirms.)
+#   1. "Detected a custom API key" — fires when ANTHROPIC_API_KEY
+#      is set. Default cursor is on "No (recommended)", so we send
+#      Up + Enter to pick "Yes". Sleeps around the keystrokes guard
+#      against Ink stale-state.
 #
-# Both prompts may appear in either order across launches. We loop
-# up to twice (one prompt may not fire) and bail to `interact` on
-# timeout so the operator's TTY gets passed through normally.
+#   2. "WARNING: Loading development channels" — fires only when
+#      --dangerously-load-development-channels is passed standalone
+#      (NOT with a server: prefix). Default cursor is on option 1,
+#      Enter confirms. As of channel_v1 + server:clawborrator this
+#      prompt is suppressed and won't normally appear, but we
+#      handle it anyway for forward-compat.
+#
+# Exit: when we see "Welcome" (the post-bootstrap banner — appears
+# in "Welcome back!" / "Welcome back <name>!" / similar) we hand
+# off via interact. 60s timeout fallback in case the banner is
+# themed or claude renders something we don't recognize.
 
-set timeout 30
+set timeout 60
 log_user 1
 
 eval spawn claude $argv
 
-# Helper proc to dispatch on whatever prompt-marker arrives next.
-# Returns 1 if a prompt was handled, 0 on timeout / EOF.
-proc handle_one_prompt {} {
-  expect {
-    # Match a unique word from the API-key prompt. "this" is too
-    # common; "approve" and "key" appear elsewhere. Stick to a
-    # short bigram that's specific. Ink interleaves ANSI between
-    # words so we match a single one.
-    -re "API key" {
-      sleep 0.2
-      # Move cursor UP from "No (recommended)" to "Yes" then Enter.
-      # CSI A is the standard up-arrow; works for Ink's default
-      # cursor-key handling.
-      send "\033\[A"
-      sleep 0.2
-      send "\r"
-      return 1
-    }
+expect {
+  # Claude finished bootstrap — banner appeared. Stop dismissing
+  # prompts; hand the PTY back. Match a single word (Ink interleaves
+  # ANSI between words but not inside them).
+  -re "Welcome" {
+    # fall through to interact
+  }
 
-    # Dev-channels warning. Default is option 1 already, just Enter.
-    -re "development" {
-      sleep 0.2
-      send "\r"
-      return 1
-    }
+  -re "API key" {
+    sleep 0.2
+    send "\033\[A"   ;# Up arrow — move cursor from "No" to "Yes"
+    sleep 0.2
+    send "\r"
+    exp_continue
+  }
 
-    timeout {
-      # No prompt arrived within the deadline. Fire Enter once
-      # blindly in case the matchers missed the recognizable word,
-      # then move on.
-      send "\r"
-      return 0
-    }
+  -re "development" {
+    sleep 0.2
+    send "\r"
+    exp_continue
+  }
 
-    eof {
-      catch wait result
-      exit [lindex $result 3]
-    }
+  timeout {
+    # Banner never matched (claude may have a different banner
+    # variant, or rendering was redirected). Fall through to
+    # interact so the operator can finish whatever's pending.
+  }
+
+  eof {
+    catch wait result
+    exit [lindex $result 3]
   }
 }
 
-# Try to handle up to 2 prompts. If only one fires, the second
-# call will time out harmlessly. Reset timeout between calls so the
-# second one doesn't wait the full 30s when nothing's coming.
-handle_one_prompt
-set timeout 5
-handle_one_prompt
-
-# Reset to default timeout (no specific deadline) and hand the
-# PTY back to the user / operator. Channel-MCP notifications keep
-# arriving in-band; nothing to do here from now on.
+# Hand the PTY back. Channel-MCP notifications keep arriving in-band;
+# nothing for the wrapper to do from here.
 set timeout -1
 interact

@@ -35,34 +35,43 @@ WORKER_HOME="/home/${WORKER_USER}"
 if [ "$(id -u)" = "0" ]; then
 
   # ─── Required env ──────────────────────────────────────────────
-  # Two auth paths, in order of preference:
+  # Two auth credentials, either or both may be set:
   #   1. ANTHROPIC_API_KEY  — sk-ant-api03-… raw API key. Claude
   #      Code reads it directly from env; no .credentials.json
-  #      needed. Simplest, doesn't rotate, doesn't share a refresh
-  #      chain with any other process. Billed against the API
-  #      account (NOT the Max subscription).
+  #      needed. Doesn't rotate, doesn't share a refresh chain
+  #      with any other process. Billed against the API account
+  #      (NOT the Max subscription).
   #   2. ANTHROPIC_ACCESS_TOKEN  — sk-ant-oat01-… OAuth access
   #      token from a Claude Max account. Entrypoint seeds
   #      ~/.claude/.credentials.json from env on first boot;
   #      claude refreshes the token chain itself thereafter via
   #      the persisted volume. Bills against the Max subscription.
   #
-  # Exactly one is required. If ANTHROPIC_API_KEY is set we skip
-  # the OAuth credentials seeding entirely — the API key path
-  # doesn't need a .credentials.json file at all.
+  # At least one is required. Both being set is the *hybrid* path
+  # — API key takes precedence for billing, OAuth credentials
+  # flip claude's internal "logged in" state to true, which the
+  # clawborrator channels feature requires. See README for the
+  # "API-key billing + OAuth-logged-in for channels" recipe.
   CREDS_DIR="${WORKER_HOME}/.claude"
   CREDS_FILE="${CREDS_DIR}/.credentials.json"
   GLOBAL_CFG="${WORKER_HOME}/.claude.json"
   SETTINGS_FILE="${CREDS_DIR}/settings.json"
   mkdir -p "${CREDS_DIR}"
 
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
+    echo "[worker] either ANTHROPIC_API_KEY or ANTHROPIC_ACCESS_TOKEN is required" >&2
+    echo "         API key:    set ANTHROPIC_API_KEY=sk-ant-api03-…" >&2
+    echo "         OAuth (Max): set ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…" >&2
+    echo "                      (pull from your local install:" >&2
+    echo "                      cat ~/.claude/.credentials.json | jq '.claudeAiOauth.accessToken')" >&2
+    exit 1
+  fi
+
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    # API key path — nothing to seed on disk. Claude Code reads
-    # ANTHROPIC_API_KEY directly from env at startup. We still
-    # need ~/.claude/ to exist (for project state, hooks,
-    # settings.local) but the credentials file isn't part of it.
-    echo "[worker] using ANTHROPIC_API_KEY (raw API auth — bills against API account, not Max)"
-  elif [ -n "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
+    echo "[worker] ANTHROPIC_API_KEY set — claude will use it for inference (bills against API account, not Max)"
+  fi
+
+  if [ -n "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
     # ─── Write OAuth credentials file ──────────────────────────────
     # Schema mirrors what `claude` writes after an interactive OAuth
     # login: a single `claudeAiOauth` block. jq binds secrets as
@@ -108,13 +117,6 @@ if [ "$(id -u)" = "0" ]; then
       chmod 600 "${CREDS_FILE}"
       echo "[worker] seeded ${CREDS_FILE} from env (claudeAiOauth, subscription=${ANTHROPIC_SUBSCRIPTION_TYPE:-max})"
     fi
-  else
-    echo "[worker] either ANTHROPIC_API_KEY or ANTHROPIC_ACCESS_TOKEN is required" >&2
-    echo "         API key:    set ANTHROPIC_API_KEY=sk-ant-api03-…" >&2
-    echo "         OAuth (Max): set ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…" >&2
-    echo "                      (pull from your local install:" >&2
-    echo "                      cat ~/.claude/.credentials.json | jq '.claudeAiOauth.accessToken')" >&2
-    exit 1
   fi
 
   # ─── Pre-seed Claude Code onboarding state (first boot only) ───
@@ -447,7 +449,16 @@ fi
 # we need to auto-dismiss (dev-channels warning, API-key approval).
 # Standalone OAuth runs without clawborrator skip the wrapper since
 # there's no prompt to dismiss.
-if [ "${USE_EXPECT_WRAPPER:-0}" = "1" ]; then
+#
+# Override: DISABLE_AUTOENTER=1 forces the bare `claude` launcher
+# even when prompts will fire. Use when you plan to `docker attach`
+# and answer the prompts yourself (e.g., to drive `/login`
+# interactively, pick "No (recommended)" on the API-key prompt to
+# get a fresh OAuth flow, etc.).
+if [ "${DISABLE_AUTOENTER:-0}" = "1" ]; then
+  LAUNCHER="claude"
+  echo "[worker] DISABLE_AUTOENTER=1 — skipping expect wrapper, you'll need to dismiss any startup prompts via docker attach"
+elif [ "${USE_EXPECT_WRAPPER:-0}" = "1" ]; then
   LAUNCHER="/usr/local/bin/claude-with-autoenter.expect"
 else
   LAUNCHER="claude"

@@ -105,6 +105,9 @@ WORKDIR /workspace
 #   CLAUDE_SKIP_PERMISSIONS      optional — "1" to pass --dangerously-skip-permissions
 #                                          (only safe in a sandboxed/throwaway container)
 #   CLAUDE_INITIAL_PROMPT        optional — single prompt to feed claude on startup
+#   DISABLE_AUTOENTER            optional — "1" to skip the expect wrapper that
+#                                          auto-dismisses startup prompts (so you
+#                                          can `docker attach` and answer them)
 #
 # Anything after the image name on `docker run` becomes extra args
 # forwarded verbatim to `claude`.

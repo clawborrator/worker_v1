@@ -51,6 +51,7 @@ services:
       GIT_USER_NAME:              "${GIT_USER_NAME:-}"
       CLAUDE_SKIP_PERMISSIONS:    "${CLAUDE_SKIP_PERMISSIONS:-0}"
       CLAUDE_INITIAL_PROMPT:      "${CLAUDE_INITIAL_PROMPT:-}"
+      DISABLE_AUTOENTER:          "${DISABLE_AUTOENTER:-0}"
     # claude is interactive when CLAWBORRATOR_TOKEN is set (operators
     # drive it via the hub); stdin_open + tty give it a real terminal.
     # If you're running pure batch (CLAUDE_INITIAL_PROMPT + claude

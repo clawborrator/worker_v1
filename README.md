@@ -82,7 +82,7 @@ docker run --rm -it --env-file .env -v "$(pwd)/workspace:/workspace" \
 
 Two auth paths are supported; pick whichever fits your billing model.
 
-### Path A — `ANTHROPIC_API_KEY` (recommended for headless workers)
+### Path A — `ANTHROPIC_API_KEY`
 
 Set `ANTHROPIC_API_KEY=sk-ant-api03-…` and you're done. Claude Code
 reads the key directly from env; the entrypoint skips the
@@ -91,6 +91,30 @@ refresh-token chain, no host/container sharing problem. Bills
 against your Anthropic API account (per-token metered).
 
 Get a key from <https://console.anthropic.com/settings/keys>.
+
+> ⚠ **API key + clawborrator channels don't work together.** Claude
+> Code treats API-key sessions as "Not logged in" for purposes of
+> the channels feature. When `ANTHROPIC_API_KEY` is set, the
+> `--dangerously-load-development-channels server:clawborrator`
+> flag is silently ignored:
+>
+> ```
+> Channels are not currently available
+> --dangerously-load-development-channels ignored (server:clawborrator)
+> ```
+>
+> The clawborrator MCP server still loads — the worker registers
+> with the hub and shows up in `list_peers` — but inbound prompts
+> routed to this worker via `route_to_peer` won't render as
+> `<channel source="…">` user-turn notifications, so the worker
+> can't be driven remotely. It can still actively call clawborrator
+> tools from inside (`list_peers`, `dispatch_to_agent`, etc.) and
+> be attached to via `docker attach`, but it's a one-way fleet
+> member.
+>
+> If you need both API-key billing AND routed-prompt reception,
+> see *Hybrid: API key billing + OAuth-logged-in for channels*
+> below.
 
 ### Path B — Claude Max OAuth (subscription billing)
 
@@ -152,21 +176,103 @@ side (host or worker) refreshes, the other's copy of the refresh
 token is invalidated. They cannot coexist long-term on the same
 chain.
 
-**Mint a worker-dedicated credential** instead:
+### Minting a worker-dedicated OAuth credential
 
-1. Run an interactive container once with no creds set:
+This is the *correct* way to put OAuth tokens in the worker's `.env`
+— get a fresh token chain by running `claude /login` inside a
+throwaway worker container. Tokens you mint this way are unrelated
+to your host's chain, so neither side's refreshes affect the other.
+
+It's also the workaround for the **API key + channels** limitation:
+seed the worker's persisted volume with these OAuth credentials,
+keep `ANTHROPIC_ACCESS_TOKEN` in `.env`, and the worker satisfies
+the "logged in" gate that the channels feature requires.
+
+**Step-by-step:**
+
+1. **Start a throwaway worker** with autoenter off + a placeholder
+   for the required-env check:
    ```bash
-   docker run --rm -it -v worker-bootstrap:/home/worker/.claude \
-     --entrypoint bash clawborrator-worker:latest
+   docker run -d -it --name worker-bootstrap \
+     -e ANTHROPIC_ACCESS_TOKEN="placeholder" \
+     -e DISABLE_AUTOENTER=1 \
+     -e CLAWBORRATOR_TOKEN= \
+     -v worker-bootstrap-home:/home/worker/.claude \
+     clawborrator-worker:latest
    ```
-2. Inside, run `claude` and walk the OAuth flow in your browser.
-3. `cat ~/.claude/.credentials.json` and copy the `accessToken` +
-   `refreshToken` values into your worker's `.env`.
-4. Optionally also `docker cp` the volume contents into the
-   `claude-home` named volume to skip the first-boot seed entirely.
+   `DISABLE_AUTOENTER=1` keeps the expect wrapper out of the way so
+   you can drive prompts manually. `CLAWBORRATOR_TOKEN=""` skips
+   the .mcp.json setup so claude doesn't try to register with the
+   hub during the bootstrap. The placeholder OAuth token is just
+   to satisfy the entrypoint's required-env check; it'll be
+   overwritten when you log in.
 
-Now host and worker have independent token chains; neither
-refreshing affects the other.
+2. **Attach and answer the API-key prompt with "No"** so claude
+   falls back to OAuth:
+   ```bash
+   docker attach --detach-keys="ctrl-p,ctrl-q" worker-bootstrap
+   ```
+   When the API-key prompt appears (it will, because the
+   placeholder ACCESS_TOKEN is bogus and claude tries env-API-key
+   next), pick **"No (recommended)"** — the default. Claude will
+   then drop into its main UI in a "Not logged in" state.
+
+3. **Run `/login`** from within the claude TUI. It prints an
+   OAuth URL. Open it in your browser, approve the connection,
+   paste the resulting code back into the TUI. Claude writes the
+   token chain to `~/.claude/.credentials.json`.
+
+4. **Detach** with `Ctrl-P, Ctrl-Q`.
+
+5. **Extract the tokens** and put them in `.env`:
+   ```bash
+   docker exec worker-bootstrap sh -c \
+     'jq -r "[.claudeAiOauth.accessToken, .claudeAiOauth.refreshToken, .claudeAiOauth.expiresAt] | @tsv" \
+       /home/worker/.claude/.credentials.json'
+   ```
+   Output is `<accessToken>\t<refreshToken>\t<expiresAt>`. Paste
+   into `.env`:
+   ```
+   ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-...
+   ANTHROPIC_REFRESH_TOKEN=sk-ant-ort01-...
+   ANTHROPIC_TOKEN_EXPIRES_AT=<unix-ms>
+   ```
+
+6. **Tear down the throwaway:**
+   ```bash
+   docker rm -f worker-bootstrap
+   docker volume rm worker-bootstrap-home
+   ```
+
+7. **Boot the real worker** with the new `.env`. The first-boot
+   seed materializes `.credentials.json` from the env values; from
+   then on the worker maintains its own chain in the `claude-home`
+   volume.
+
+The host's CC and this worker now have independent token chains.
+You can re-run the recipe per worker if you want multiple
+independently-refreshing identities.
+
+### Hybrid: API-key billing + OAuth-logged-in for channels
+
+If you specifically want to bill against your API account but
+still need clawborrator channels to route prompts in, set BOTH
+in `.env`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-api03-...     # for inference billing
+ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-... # for the "logged in" gate
+ANTHROPIC_REFRESH_TOKEN=sk-ant-ort01-...
+```
+
+The OAuth credentials only need to be valid enough for claude to
+consider the session "logged in"; the API key takes precedence for
+actual model calls. Mint the OAuth tokens via the recipe above.
+
+The entrypoint accepts both being set — it materializes
+`.credentials.json` from the OAuth values (which flips claude's
+"logged in" state to true) and lets `ANTHROPIC_API_KEY` flow
+through to the model API for billing.
 
 ## Modes
 
