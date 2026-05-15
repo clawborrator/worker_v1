@@ -33,6 +33,11 @@
 #   ANTHROPIC_RATE_LIMIT_TIER, REPO_URL, REPO_REF, REPO_PAT,
 #   REPO_PAT_USER, REPO_DIR_NAME, CLAUDE_SKIP_PERMISSIONS,
 #   GIT_USER_EMAIL, GIT_USER_NAME, MODEL
+#
+# Image reference (sibling container's docker image) defaults to
+# `ladder99/clawborrator-worker:latest`. Override with WORKER_IMAGE
+# for forks / private registries.
+#
 # All three auth envs are forwarded as-is (empty when unset).
 # The child entrypoint's first-match-wins resolution picks the same
 # path the parent did:
@@ -142,13 +147,19 @@ set -- \
 # in `docker ps -a`). State that should survive lives in the
 # child's own claude-home volume (one per child, created
 # implicitly by docker run when not pre-declared).
-echo "spawn-worker: launching ${CONTAINER_NAME} (role=${ROLE})" >&2
+#
+# Image reference defaults to the Docker Hub published name so the
+# host doesn't need a local build of worker_v1. Override with
+# WORKER_IMAGE if you maintain a fork or have a private registry
+# mirror.
+WORKER_IMAGE="${WORKER_IMAGE:-ladder99/clawborrator-worker:latest}"
+echo "spawn-worker: launching ${CONTAINER_NAME} (role=${ROLE}, image=${WORKER_IMAGE})" >&2
 CONTAINER_ID=$(docker run -d -it --rm \
   --name "${CONTAINER_NAME}" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   "$@" \
   ${EXTRA_ENVS} \
-  clawborrator-worker:latest)
+  "${WORKER_IMAGE}")
 
 if [ -z "${CONTAINER_ID}" ]; then
   err "docker run returned empty container id"
