@@ -79,14 +79,20 @@ RUN useradd --create-home --uid 1001 --shell /bin/bash worker && \
 WORKDIR /workspace
 
 # Environment contract (full doc in README.md):
-#   ANTHROPIC_API_KEY            one of two — raw API key (sk-ant-api03-…); used
-#                                          directly by claude (no credentials.json).
-#                                          Bills against API account, not Max.
-#   ANTHROPIC_ACCESS_TOKEN       one of two — OAuth access token (sk-ant-oat01-…);
-#                                          written into ~/.claude/.credentials.json.
-#                                          Bills against Max subscription.
-#   ANTHROPIC_REFRESH_TOKEN      optional — refresh token (sk-ant-ort01-…);
-#                                          required for auto-renewal of long-lived workers
+#   Auth — first-match-wins across these three, lower-priority envs unset:
+#   ANTHROPIC_API_KEY            preferred for API-billed inference. Raw key
+#                                          (sk-ant-api03-…); read directly from env.
+#                                          Bills against API account; disables channels.
+#   CLAUDE_CODE_OAUTH_TOKEN      preferred for Max-billed inference. OAuth token
+#                                          (sk-ant-oat01-…) from `claude setup-token`;
+#                                          read directly from env. Channels work.
+#   ANTHROPIC_ACCESS_TOKEN       legacy OAuth — same token shape as above; worker
+#                                          seeds ~/.claude/.credentials.json from it
+#                                          on first boot. Use only when setup-token
+#                                          isn't available.
+#   ANTHROPIC_REFRESH_TOKEN      optional — refresh token (sk-ant-ort01-…) paired with
+#                                          ANTHROPIC_ACCESS_TOKEN; required for
+#                                          auto-renewal of long-lived workers on Path C.
 #   ANTHROPIC_TOKEN_EXPIRES_AT   optional — unix ms expiry; defaults far-future
 #   ANTHROPIC_SUBSCRIPTION_TYPE  optional — default "max"
 #   ANTHROPIC_RATE_LIMIT_TIER    optional — default "default_claude_max_20x"

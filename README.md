@@ -80,9 +80,11 @@ docker run --rm -it --env-file .env -v "$(pwd)/workspace:/workspace" \
 
 ## Authentication
 
-Two auth paths are supported; pick whichever fits your billing model.
+Three auth paths, evaluated as a strict **first-match-wins**
+fallback chain. If you set more than one, the higher-priority env
+wins and the lower-priority ones are unset before claude launches.
 
-### Path A — `ANTHROPIC_API_KEY`
+### Path A — `ANTHROPIC_API_KEY` (API-billed, no channels)
 
 Set `ANTHROPIC_API_KEY=sk-ant-api03-…` and you're done. Claude Code
 reads the key directly from env; the entrypoint skips the
@@ -96,55 +98,69 @@ Get a key from <https://console.anthropic.com/settings/keys>.
 > Code treats API-key sessions as "Not logged in" for purposes of
 > the channels feature. When `ANTHROPIC_API_KEY` is set, the
 > `--dangerously-load-development-channels server:clawborrator`
-> flag is silently ignored:
->
-> ```
-> Channels are not currently available
-> --dangerously-load-development-channels ignored (server:clawborrator)
-> ```
->
-> The clawborrator MCP server still loads — the worker registers
-> with the hub and shows up in `list_peers` — but inbound prompts
-> routed to this worker via `route_to_peer` won't render as
+> flag is silently ignored: the clawborrator MCP server still loads
+> (worker registers with the hub, shows up in `list_peers`) but
+> inbound prompts routed via `route_to_peer` won't render as
 > `<channel source="…">` user-turn notifications, so the worker
-> can't be driven remotely. It can still actively call clawborrator
-> tools from inside (`list_peers`, `dispatch_to_agent`, etc.) and
-> be attached to via `docker attach`, but it's a one-way fleet
-> member.
+> can't be driven remotely.
 >
-> If you need both API-key billing AND routed-prompt reception,
-> see *Hybrid: API key billing + OAuth-logged-in for channels*
-> below.
+> If you need both Max-subscription billing AND channels, use
+> **Path B** below — it gives you channels natively without the
+> hybrid hack.
 
-### Path B — Claude Max OAuth (subscription billing)
+### Path B — `CLAUDE_CODE_OAUTH_TOKEN` (preferred OAuth path)
+
+Run `claude setup-token` on a logged-in machine to produce a
+`CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…` line, then drop the value
+into the worker's `.env`. Claude Code reads the token directly from
+env — no `.credentials.json` seeding, no refresh-token rotation
+dance, no on-disk credentials state.
+
+- Bills against your Claude Max subscription.
+- Channels work — same OAuth-logged-in state as an interactive
+  `claude /login`, so the worker is fully addressable by your
+  channel token.
+- No `claude-home` volume contention. Two workers can share the
+  same source token without invalidating each other's refresh
+  chain, because there isn't one — the token doesn't auto-renew,
+  it expires when its lifetime is up and you re-run setup-token.
+
+This is the cleanest path; prefer it unless you have a specific
+reason to fall back to Path C.
+
+### Path C — `ANTHROPIC_ACCESS_TOKEN` (legacy OAuth fallback)
 
 Set `ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…` and (recommended)
 `ANTHROPIC_REFRESH_TOKEN=sk-ant-ort01-…`. The entrypoint seeds a
 standard `~/.claude/.credentials.json` file on **first boot only**,
-matching the shape Claude Code creates after an interactive `claude`
-login. Claude refreshes the token chain itself thereafter (the
-`claude-home` named volume persists the chain across restarts).
+matching the shape Claude Code creates after an interactive
+`claude` login. Claude refreshes the token chain itself thereafter
+(the `claude-home` named volume persists it across restarts).
 
 Optional fine-tuning: `ANTHROPIC_TOKEN_EXPIRES_AT` (unix ms),
 `ANTHROPIC_SUBSCRIPTION_TYPE` (default `max`),
 `ANTHROPIC_RATE_LIMIT_TIER` (default `default_claude_max_20x`).
 
-The materialized credentials file lives at
-`/home/worker/.claude/.credentials.json` inside the container with
-mode `0600`. Anyone with shell access to the container can read it;
-treat container access as token-equivalent.
+**Use only when Path B isn't available** — e.g. you can't run
+`claude setup-token` and only have the access-token field
+extracted from an existing local `.credentials.json`.
 
-**Warning about Path B**: Anthropic's refresh tokens are single-use.
-When either side (host or worker) refreshes, the other's copy of
-the refresh token is invalidated. Don't share host tokens with a
-long-running worker; mint a worker-dedicated credential (see
-*Credentials persistence* below) or use Path A instead.
+**Warning**: Anthropic's refresh tokens are single-use. When either
+side (host or worker) refreshes, the other's copy is invalidated.
+Don't share host tokens with a long-running worker; mint a worker-
+dedicated credential (see *Credentials persistence* below) — or
+better, just use Path B.
 
 ### Picking between them
 
-Set ANTHROPIC_API_KEY for Path A, leave it blank and set
-ANTHROPIC_ACCESS_TOKEN for Path B. **Exactly one must be set**;
-the entrypoint exits with a clear error if neither is provided.
+`.env` may have multiple set; the entrypoint picks the first one
+in order A → B → C. The previous "hybrid" mode (API key +
+ANTHROPIC_ACCESS_TOKEN simultaneously, used to keep channels
+working under API-key billing) is obsolete — Path B gives you
+the same outcome cleanly.
+
+If none of the three are set, the entrypoint exits with a clear
+error pointing at the precedence.
 
 ### Credentials persistence (named volume)
 
@@ -321,9 +337,10 @@ that file rather than memorizing the table below.
 
 | Var | Required? | Default | Notes |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | one of two | — | Raw API key (`sk-ant-api03-…`); used directly by claude, no `.credentials.json`. Bills against API account. Set this OR `ANTHROPIC_ACCESS_TOKEN`. |
-| `ANTHROPIC_ACCESS_TOKEN` | one of two | — | Claude Max OAuth access token (`sk-ant-oat01-…`); seeded into `~/.claude/.credentials.json` on first boot. Bills against Max subscription. |
-| `ANTHROPIC_REFRESH_TOKEN` | recommended | empty | Refresh token (`sk-ant-ort01-…`). Without it, no auto-renewal — long-lived workers will fail when the access token expires. |
+| `ANTHROPIC_API_KEY` | one of three | — | Path A (highest priority). Raw API key (`sk-ant-api03-…`); read directly from env. Bills against API account; **disables channels**. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | one of three | — | Path B (preferred OAuth). From `claude setup-token` (`sk-ant-oat01-…`); read directly from env. Bills against Max subscription; **channels work**. |
+| `ANTHROPIC_ACCESS_TOKEN` | one of three | — | Path C (legacy OAuth fallback). Same token shape as Path B; worker seeds `~/.claude/.credentials.json` from this on first boot. Use only when `setup-token` isn't available. |
+| `ANTHROPIC_REFRESH_TOKEN` | Path-C only | empty | Refresh token (`sk-ant-ort01-…`). Paired with `ANTHROPIC_ACCESS_TOKEN`. Without it, no auto-renewal — long-lived Path-C workers fail when the access token expires. |
 | `ANTHROPIC_TOKEN_EXPIRES_AT` | no | far-future | Unix ms expiry. |
 | `ANTHROPIC_SUBSCRIPTION_TYPE` | no | `max` | Subscription label. |
 | `ANTHROPIC_RATE_LIMIT_TIER` | no | `default_claude_max_20x` | Rate-limit tier label. |

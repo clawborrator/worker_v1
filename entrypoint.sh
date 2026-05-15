@@ -35,53 +35,75 @@ WORKER_HOME="/home/${WORKER_USER}"
 if [ "$(id -u)" = "0" ]; then
 
   # ─── Required env ──────────────────────────────────────────────
-  # Two auth credentials, either or both may be set:
-  #   1. ANTHROPIC_API_KEY  — sk-ant-api03-… raw API key. Claude
-  #      Code reads it directly from env; no .credentials.json
-  #      needed. Doesn't rotate, doesn't share a refresh chain
-  #      with any other process. Billed against the API account
-  #      (NOT the Max subscription).
-  #   2. ANTHROPIC_ACCESS_TOKEN  — sk-ant-oat01-… OAuth access
-  #      token from a Claude Max account. Entrypoint seeds
-  #      ~/.claude/.credentials.json from env on first boot;
-  #      claude refreshes the token chain itself thereafter via
-  #      the persisted volume. Bills against the Max subscription.
+  # Three accepted auth credentials, evaluated as a strict
+  # first-match-wins fallback chain:
   #
-  # At least one is required. Both being set is the *hybrid* path
-  # — API key takes precedence for billing, OAuth credentials
-  # flip claude's internal "logged in" state to true, which the
-  # clawborrator channels feature requires. See README for the
-  # "API-key billing + OAuth-logged-in for channels" recipe.
+  #   1. ANTHROPIC_API_KEY        — sk-ant-api03-… raw API key.
+  #      Claude Code reads it directly from env; no
+  #      .credentials.json needed. Bills against the API account
+  #      (NOT the Max subscription). Disables the channels
+  #      feature server-side (claude refuses to load
+  #      --dangerously-load-development-channels under raw API-
+  #      key auth) — if you want channels, use one of the OAuth
+  #      paths instead.
+  #
+  #   2. CLAUDE_CODE_OAUTH_TOKEN  — sk-ant-oat01-… OAuth access
+  #      token. Produced by `claude setup-token` on a logged-in
+  #      machine. Claude Code reads it directly from env; no
+  #      .credentials.json seeding needed. Bills against the Max
+  #      subscription. **Preferred OAuth path** — channels work,
+  #      no on-disk credentials state.
+  #
+  #   3. ANTHROPIC_ACCESS_TOKEN   — sk-ant-oat01-… OAuth access
+  #      token from a Claude Max account. Legacy path: worker
+  #      seeds ~/.claude/.credentials.json from env on first
+  #      boot; claude refreshes the token chain itself thereafter
+  #      via the persisted volume. Use only when
+  #      CLAUDE_CODE_OAUTH_TOKEN isn't available (e.g. you
+  #      already extracted just the access-token field from
+  #      a local install).
+  #
+  # The previous "hybrid" mode (API key + ANTHROPIC_ACCESS_TOKEN
+  # both set, to keep channels working under API-key billing) is
+  # obsolete — CLAUDE_CODE_OAUTH_TOKEN gives you channels +
+  # Max-billed inference natively without the .credentials.json
+  # hack. Multi-env collisions now resolve to first-match-wins.
   CREDS_DIR="${WORKER_HOME}/.claude"
   CREDS_FILE="${CREDS_DIR}/.credentials.json"
   GLOBAL_CFG="${WORKER_HOME}/.claude.json"
   SETTINGS_FILE="${CREDS_DIR}/settings.json"
   mkdir -p "${CREDS_DIR}"
 
-  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
-    echo "[worker] either ANTHROPIC_API_KEY or ANTHROPIC_ACCESS_TOKEN is required" >&2
-    echo "         API key:    set ANTHROPIC_API_KEY=sk-ant-api03-…" >&2
-    echo "         OAuth (Max): set ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…" >&2
-    echo "                      (pull from your local install:" >&2
-    echo "                      cat ~/.claude/.credentials.json | jq '.claudeAiOauth.accessToken')" >&2
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
+    echo "[worker] one of ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or ANTHROPIC_ACCESS_TOKEN is required" >&2
+    echo "         API key:                set ANTHROPIC_API_KEY=sk-ant-api03-…" >&2
+    echo "         OAuth (preferred):      set CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…" >&2
+    echo "                                 (run \`claude setup-token\` on a logged-in machine)" >&2
+    echo "         OAuth (legacy):         set ANTHROPIC_ACCESS_TOKEN=sk-ant-oat01-…" >&2
+    echo "                                 (seeds ~/.claude/.credentials.json on first boot)" >&2
     exit 1
   fi
 
+  # Resolve which auth path wins. First-match-wins; lower-priority
+  # envs are unset so claude's downstream lookup never sees them and
+  # logs aren't ambiguous about which path is in play.
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "[worker] ANTHROPIC_API_KEY set — claude will use it for inference (bills against API account, not Max)"
-  fi
-
-  if [ -n "${ANTHROPIC_ACCESS_TOKEN:-}" ]; then
-    # ─── Write OAuth credentials file ──────────────────────────────
-    # Schema mirrors what `claude` writes after an interactive OAuth
-    # login: a single `claudeAiOauth` block. jq binds secrets as
-    # parameters so a token with an odd char can't break the JSON.
+    unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_ACCESS_TOKEN ANTHROPIC_REFRESH_TOKEN
+    echo "[worker] ANTHROPIC_API_KEY set — claude reads it directly from env (bills against API account, channels disabled)"
+  elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    unset ANTHROPIC_ACCESS_TOKEN ANTHROPIC_REFRESH_TOKEN
+    echo "[worker] CLAUDE_CODE_OAUTH_TOKEN set — claude reads it directly from env (Max subscription, channels work)"
+  else
+    # ANTHROPIC_ACCESS_TOKEN path (must be set if we got here — the
+    # require-at-least-one check above guarantees it). Seed the
+    # claudeAiOauth credentials.json the way `claude` would after an
+    # interactive OAuth login.
     #
-    # First-boot seed only — when ${WORKER_HOME}/.claude is a
-    # docker named volume, the file survives container restart.
-    # Claude Code rewrites .credentials.json itself whenever it
-    # refreshes the OAuth token chain; overwriting on every boot
-    # would destroy the freshly-refreshed credentials.
+    # First-boot seed only — when ${WORKER_HOME}/.claude is a docker
+    # named volume, the file survives container restart. Claude Code
+    # rewrites .credentials.json itself whenever it refreshes the
+    # OAuth token chain; overwriting on every boot would destroy the
+    # freshly-refreshed credentials.
     #
     # Defaults:
     #   - refreshToken: empty. Without it, no auto-renewal.
@@ -89,6 +111,8 @@ if [ "$(id -u)" = "0" ]; then
     #     proactively refresh on a stale-looking timestamp.
     #   - scopes: the full Claude-Code-issued set.
     #   - subscriptionType + rateLimitTier: match Claude Max.
+    echo "[worker] ANTHROPIC_ACCESS_TOKEN set — using legacy credentials.json seed path"
+    echo "[worker] consider switching to CLAUDE_CODE_OAUTH_TOKEN (run \`claude setup-token\` to get one — Claude reads it directly from env without the .credentials.json hack)"
     if [ -f "${CREDS_FILE}" ]; then
       echo "[worker] ${CREDS_FILE} already present — keeping (worker maintains its own OAuth chain)"
     else
