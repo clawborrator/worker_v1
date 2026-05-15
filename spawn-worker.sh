@@ -27,14 +27,16 @@
 #
 # Inherited from parent env (no flag needed):
 #   CLAWBORRATOR_TOKEN, CLAWBORRATOR_HUB_URL,
-#   ANTHROPIC_API_KEY,
+#   ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,
 #   ANTHROPIC_ACCESS_TOKEN, ANTHROPIC_REFRESH_TOKEN,
 #   ANTHROPIC_TOKEN_EXPIRES_AT, ANTHROPIC_SUBSCRIPTION_TYPE,
 #   ANTHROPIC_RATE_LIMIT_TIER, REPO_URL, REPO_REF, REPO_PAT,
 #   REPO_PAT_USER, REPO_DIR_NAME, CLAUDE_SKIP_PERMISSIONS,
 #   GIT_USER_EMAIL, GIT_USER_NAME, MODEL
-# (Whichever of API_KEY / ACCESS_TOKEN is unset in parent is just
-# an empty string, so children pick the same auth path as parent.)
+# All three auth envs are forwarded as-is (empty when unset).
+# The child entrypoint's first-match-wins resolution picks the same
+# path the parent did:
+#   ANTHROPIC_API_KEY  >  CLAUDE_CODE_OAUTH_TOKEN  >  ANTHROPIC_ACCESS_TOKEN
 #
 # Always set on the child (no opt-out — spawn-worker's identity is
 # "ephemeral helper"; if you want a persistent worker, use
@@ -114,6 +116,7 @@ set -- \
   -e "CLAWBORRATOR_TOKEN=${CLAWBORRATOR_TOKEN:-}" \
   -e "CLAWBORRATOR_HUB_URL=${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}" \
   -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+  -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e "ANTHROPIC_ACCESS_TOKEN=${ANTHROPIC_ACCESS_TOKEN:-}" \
   -e "ANTHROPIC_REFRESH_TOKEN=${ANTHROPIC_REFRESH_TOKEN:-}" \
   -e "ANTHROPIC_TOKEN_EXPIRES_AT=${ANTHROPIC_TOKEN_EXPIRES_AT:-}" \
