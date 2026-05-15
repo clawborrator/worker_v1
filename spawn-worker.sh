@@ -53,6 +53,22 @@
 
 set -e
 
+# ─── Source the parent's spawn-env snapshot ────────────────────
+# The parent's entrypoint writes /etc/clawborrator/spawn-env.conf
+# at boot with every env var spawn-worker forwards to children.
+# We can't rely on `${VAR}` env inheritance here because Claude
+# Code redacts ANTHROPIC_* / CLAUDE_CODE_* env vars from Bash-tool
+# subprocesses (security feature) — so by the time spawn-worker
+# runs from a CC tool call, those vars look empty. Sourcing the
+# file restores them locally without leaking back into env.
+SPAWN_ENV_FILE="/etc/clawborrator/spawn-env.conf"
+if [ -f "${SPAWN_ENV_FILE}" ]; then
+  set -a
+  # shellcheck disable=SC1090,SC1091
+  . "${SPAWN_ENV_FILE}"
+  set +a
+fi
+
 err() { echo "spawn-worker: $*" >&2; exit 1; }
 
 # ─── Parse args ─────────────────────────────────────────────────
