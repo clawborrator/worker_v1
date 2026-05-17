@@ -328,6 +328,38 @@ Set `CLAUDE_INITIAL_PROMPT="summarize this repo in three bullets and exit"`.
 Claude starts with that prompt instead of an empty buffer. Pair
 with no `CLAWBORRATOR_TOKEN` for a fully headless one-shot.
 
+### Ephemeral worker (spawn → do work → die)
+
+For the "fire a worker, get a result via `route_to_peer`, container
+disappears" pattern (CI agent, stats probe, scrape-once-and-report),
+combine `CLAUDE_INITIAL_PROMPT` + `CLAWBORRATOR_EPHEMERAL=1` +
+`docker run --rm -dt`. Example:
+
+```bash
+docker run -dt --rm \
+  --name stats-probe \
+  --env-file ~/.clawborrator-spawn.env \
+  -e CLAWBORRATOR_EPHEMERAL=1 \
+  -e CLAWBORRATOR_ROUTING_NAME=stats-probe \
+  -e CLAUDE_INITIAL_PROMPT="Read /host/proc/meminfo, post a JSON summary to @clauderemote via mcp__clawborrator__route_to_peer, then you're done." \
+  -v /proc:/host/proc:ro \
+  clawborrator-worker:latest
+```
+
+What happens: container boots, MCP registers with the hub, Claude
+runs the prompt, route_to_peer delivers the result, the Stop hook
+fires when the assistant turn ends, the hook signals PID 1 (because
+`CLAWBORRATOR_EPHEMERAL=1`), the container shuts down, `--rm` removes
+it, the hub reaps the session row (`deleteOnDisconnect` was set in
+the register frame thanks to the same env flag). Total residue:
+zero. No timeout enforcement needed from the caller.
+
+The `~/.clawborrator-spawn.env` file is just a minimal env-file with
+the three shared secrets (`CLAWBORRATOR_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `CLAWBORRATOR_HUB_URL`); per-spawn vars
+(`CLAUDE_INITIAL_PROMPT`, `CLAWBORRATOR_ROUTING_NAME`, etc.) go on
+the command line via `-e`.
+
 ---
 
 ## Environment variables
@@ -346,6 +378,8 @@ that file rather than memorizing the table below.
 | `ANTHROPIC_RATE_LIMIT_TIER` | no | `default_claude_max_20x` | Rate-limit tier label. |
 | `CLAWBORRATOR_TOKEN` | no | unset | `ck_live_…` channel token. If unset, no hub integration. |
 | `CLAWBORRATOR_HUB_URL` | no | `wss://next.clawborrator.com` | Override for self-hosted hubs. |
+| `CLAWBORRATOR_ROUTING_NAME` | no | derived from cwd | Slug the hub uses as the session's `@routing-name`. Without it, every worker_v1 container collides on `@workspace` and gets UUID-suffixed. Requires `clawborrator-mcp >= 0.0.37`. |
+| `CLAWBORRATOR_EPHEMERAL` | no | `0` | `"1"` flags the session as one-shot. Hub deletes the session row on WS close (vs. flipping it to offline-and-archived), AND the bundled CC hook hard-exits PID 1 of the container after the assistant's first Stop event fires, so spawn-do-work-die runs without the caller having to enforce its own timeout. Pairs naturally with `--rm` on `docker run`. Requires `clawborrator-mcp >= 0.0.38`. |
 | `REPO_URL` | no | unset | Git URL (plain, no embedded creds); cloned into `/workspace/${REPO_DIR_NAME}` on first run only. |
 | `REPO_REF` | no | unset | Branch/tag/sha to check out after clone. |
 | `REPO_PAT` | no | unset | Personal access token. Spliced into `REPO_URL` at clone time for private repos. **Persists in `.git/config`** — treat container access as PAT-equivalent. |
@@ -474,7 +508,7 @@ siblings of the parent on the same host, not nested children.
 **Spawn from inside claude (via its Bash tool):**
 
 ```bash
-docker run -d --rm \
+docker run -dt --rm \
   --name worker-child-$(date +%s) \
   -e CLAWBORRATOR_TOKEN="$CLAWBORRATOR_TOKEN" \
   -e ANTHROPIC_ACCESS_TOKEN="$ANTHROPIC_ACCESS_TOKEN" \
@@ -484,6 +518,15 @@ docker run -d --rm \
   -e CLAUDE_INITIAL_PROMPT="$WORK_DESCRIPTION" \
   clawborrator-worker:latest
 ```
+
+The `-t` (allocate a TTY) is **load-bearing**, not optional. The
+image's entrypoint is `claude-with-autoenter.expect`, an `expect(1)`
+wrapper that drives Claude Code's interactive TUI. Without a TTY,
+`expect` has nothing to attach to and exits cleanly in ~2 seconds.
+The container looks like it ran (exit code 0) but nothing actually
+happened. `-dt` (detached + TTY) is the correct combo for headless
+spawns. For compose users, set `tty: true` AND `stdin_open: true`
+on the service (already set in the bundled `docker-compose.yml`).
 
 The new container's claude registers with the hub within ~10–15s.
 It shows up in the parent's `list_peers` as a fresh `@workspace-…`
