@@ -101,6 +101,19 @@ WORKDIR /workspace
 #   CLAWBORRATOR_TOKEN           optional — ck_live_… channel token; if set,
 #                                          the worker registers with the hub
 #   CLAWBORRATOR_HUB_URL         optional — default wss://next.clawborrator.com
+#   CLAWBORRATOR_ROUTING_NAME    optional — operator-supplied routing name
+#                                          (e.g. "reddit-engager"). When set,
+#                                          the MCP includes it in the register
+#                                          frame and the hub uses it as the
+#                                          candidate name instead of deriving
+#                                          from cwd. Normalized to lowercase +
+#                                          dash-only slug. Without it every
+#                                          worker_v1 container collides on
+#                                          @workspace and gets UUID-suffixed.
+#                                          Requires clawborrator-mcp >= 0.0.37
+#                                          and a hub deployment that honors
+#                                          the field (next.clawborrator.com +
+#                                          dodgevipertech do as of 2026-05-17).
 #   REPO_URL                     optional — git clone into /workspace on first run
 #   REPO_REF                     optional — branch / tag / sha to checkout after clone
 #   REPO_PAT                     optional — PAT spliced into REPO_URL for private clones
