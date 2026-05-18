@@ -343,13 +343,24 @@ echo "[worker] model: ${MODEL:-haiku} (ANTHROPIC_MODEL=${ANTHROPIC_MODEL})"
 # written below orients claude to this layout.
 #
 # Only clones if REPO_URL is set AND the target dir doesn't already
-# have a .git directory. So the second container boot reuses the
-# existing checkout — git pull is up to whatever Claude or the
-# operator runs.
+# have a .git directory. On second+ boots the existing checkout is
+# reused but we now `git pull --ff-only` so the latest playbook on
+# the remote is what runs. This means "docker restart picks up the
+# latest CLAUDE.md" is the actual contract — previously the comment
+# said `git pull is up to whatever Claude or the operator runs`,
+# which surprised everyone (engagers ran stale playbooks across
+# restarts unless the operator manually pulled).
 REPO_DIR="/workspace/${REPO_DIR_NAME:-repo}"
 if [ -n "${REPO_URL:-}" ]; then
   if [ -d "${REPO_DIR}/.git" ]; then
-    echo "[worker] ${REPO_DIR} already contains a git checkout — skipping clone"
+    echo "[worker] ${REPO_DIR} already contains a git checkout — pulling latest"
+    if ! git -C "${REPO_DIR}" pull --ff-only 2>&1; then
+      echo "[worker] git pull failed (network, divergent history, or detached HEAD) — continuing with existing checkout"
+    elif [ -n "${REPO_REF:-}" ]; then
+      echo "[worker] re-checking out ref ${REPO_REF} after pull"
+      git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
+        echo "[worker] ref ${REPO_REF} not found — staying on default branch"
+    fi
   else
     # Splice PAT into the URL if one was supplied. We rewrite into
     # https://<user>:<pat>@<host>/<path>. The full credentialed URL
