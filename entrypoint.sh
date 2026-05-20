@@ -344,18 +344,29 @@ echo "[worker] model: ${MODEL:-haiku} (ANTHROPIC_MODEL=${ANTHROPIC_MODEL})"
 #
 # Only clones if REPO_URL is set AND the target dir doesn't already
 # have a .git directory. On second+ boots the existing checkout is
-# reused but we now `git pull --ff-only` so the latest playbook on
-# the remote is what runs. This means "docker restart picks up the
-# latest CLAUDE.md" is the actual contract — previously the comment
-# said `git pull is up to whatever Claude or the operator runs`,
-# which surprised everyone (engagers ran stale playbooks across
-# restarts unless the operator manually pulled).
+# reused but we `git pull --rebase` so the latest playbook on the
+# remote is what runs. This means "docker restart picks up the
+# latest CLAUDE.md" is the actual contract.
+#
+# Why --rebase and not --ff-only: many workers (the engager, the
+# cloud-chaser) commit their own activity output (audit JSON,
+# snapshots) into the repo every cycle. If such a commit is
+# unpushed when the operator pushes a playbook change, the local
+# branch has diverged and `--ff-only` refuses the pull entirely —
+# silently leaving the worker on the STALE playbook across the
+# restart. `--rebase` replays the worker's own commits on top of
+# the new remote commits instead; the worker's commits touch
+# data/* paths while playbook commits touch CLAUDE.md/specialists/,
+# so a rebase conflict is effectively impossible. If a rebase
+# somehow does wedge, abort it so the worker still boots into a
+# usable (if not-updated) checkout rather than a half-rebased one.
 REPO_DIR="/workspace/${REPO_DIR_NAME:-repo}"
 if [ -n "${REPO_URL:-}" ]; then
   if [ -d "${REPO_DIR}/.git" ]; then
-    echo "[worker] ${REPO_DIR} already contains a git checkout — pulling latest"
-    if ! git -C "${REPO_DIR}" pull --ff-only 2>&1; then
-      echo "[worker] git pull failed (network, divergent history, or detached HEAD) — continuing with existing checkout"
+    echo "[worker] ${REPO_DIR} already contains a git checkout — pulling latest (rebase)"
+    if ! git -C "${REPO_DIR}" pull --rebase 2>&1; then
+      echo "[worker] git pull --rebase failed — aborting any partial rebase, continuing with existing checkout"
+      git -C "${REPO_DIR}" rebase --abort 2>/dev/null || true
     elif [ -n "${REPO_REF:-}" ]; then
       echo "[worker] re-checking out ref ${REPO_REF} after pull"
       git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
