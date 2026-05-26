@@ -494,14 +494,19 @@ HUB_URL="${CLAWBORRATOR_HUB_URL:-wss://next.clawborrator.com}"
 FLAGS=""
 if [ -n "${CLAWBORRATOR_TOKEN:-}" ]; then
   echo "[worker] writing .mcp.json — clawborrator hub=${HUB_URL}"
+  # Invoke the globally-installed bin directly (npm install -g lands
+  # it at /usr/local/bin/clawborrator-mcp via the package's bin field).
+  # Bypasses npx -y, which on container recreate has an empty cache
+  # and races claude-code's MCP startup timeout when paired with other
+  # cold-spawning MCP servers in the same .mcp.json.
   jq -n \
     --arg hub  "${HUB_URL}" \
     --arg tok  "${CLAWBORRATOR_TOKEN}" \
     '{
       mcpServers: {
         clawborrator: {
-          command: "npx",
-          args:    ["-y", "clawborrator-mcp"],
+          command: "clawborrator-mcp",
+          args:    [],
           env: {
             CLAWBORRATOR_HUB_URL: $hub,
             CLAWBORRATOR_TOKEN:   $tok
@@ -510,6 +515,56 @@ if [ -n "${CLAWBORRATOR_TOKEN:-}" ]; then
       }
     }' > .mcp.json
   chmod 600 .mcp.json
+
+  # ─── Optional repo-side .mcp.json merge ───────────────────────
+  # Specialist playbooks can ship a .mcp.json at the repo root
+  # listing additional MCP servers (e.g. Google Drive, Salesforce,
+  # internal tooling). Merge those entries into /workspace/.mcp.json
+  # so claude sees them at boot. Worker's clawborrator entry wins
+  # on key collision — the repo can't accidentally clobber the
+  # token-bearing channel connection.
+  REPO_DIR_REL="${REPO_DIR_NAME:-repo}"
+  REPO_MCP="/workspace/${REPO_DIR_REL}/.mcp.json"
+  if [ -f "${REPO_MCP}" ]; then
+    echo "[worker] merging repo-side .mcp.json from ${REPO_DIR_REL}/"
+    if jq -n \
+        --slurpfile repo "${REPO_MCP}" \
+        --slurpfile core /workspace/.mcp.json \
+        '{ mcpServers: (($repo[0].mcpServers // {}) + ($core[0].mcpServers // {})) }' \
+        > /workspace/.mcp.json.merged 2>/tmp/mcp-merge-err; then
+      mv /workspace/.mcp.json.merged /workspace/.mcp.json
+      chmod 600 /workspace/.mcp.json
+      # Count merged keys for the boot log so operators can spot
+      # silent drops (e.g. malformed entries that jq skipped).
+      EXTRA_KEYS=$(jq -r '.mcpServers | keys[] | select(. != "clawborrator")' /workspace/.mcp.json | tr '\n' ',' | sed 's/,$//')
+      echo "[worker] merged MCP servers: ${EXTRA_KEYS:-<none>}"
+    else
+      echo "[worker] WARN: failed to merge repo .mcp.json; keeping clawborrator-only config:"
+      cat /tmp/mcp-merge-err
+      rm -f /workspace/.mcp.json.merged
+    fi
+  fi
+
+  # ─── Env substitution on the final .mcp.json ──────────────────
+  # Specialist .mcp.json files can reference env vars via the
+  # standard ${VAR} syntax — useful for API keys passed via the
+  # worker's .env (so secrets don't sit in the repo). Unset vars
+  # are left untouched so a literal "${not-an-env-var}" stays as
+  # written. Only matches ${UPPERCASE_UNDERSCORE} to avoid
+  # accidentally substituting unrelated placeholder syntax.
+  node <<'MCP_ENVSUB'
+const fs = require('fs');
+const path = '/workspace/.mcp.json';
+const src = fs.readFileSync(path, 'utf8');
+const out = src.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (m, n) =>
+  process.env[n] !== undefined ? process.env[n] : m);
+if (out !== src) {
+  fs.writeFileSync(path, out);
+  console.log('[worker] applied env substitution to .mcp.json');
+}
+MCP_ENVSUB
+  chmod 600 /workspace/.mcp.json
+
   # --dangerously-load-development-channels enables in-band channel
   # notifications (`<channel source="..." chat_id="…">` tags showing
   # up inline in Claude's context). The non-dangerous --channels
@@ -552,6 +607,33 @@ elif [ "${USE_EXPECT_WRAPPER:-0}" = "1" ]; then
   LAUNCHER="/usr/local/bin/claude-with-autoenter.expect"
 else
   LAUNCHER="claude"
+fi
+
+# ─── network-ready gate ───────────────────────────────────────────
+# Block until the clawborrator hub is reachable before spawning
+# claude. Docker's restart policy (unless-stopped) launches the
+# container as soon as docker-engine is up after a host reboot —
+# which can be seconds before systemd-resolved or routing tables
+# are stable. Without this gate, claude-code spawns MCP servers
+# against a not-yet-routable hub, the MCP clients fail-fast into
+# a silent-dead state, and the container stays "up" with no
+# working MCPs until manual restart. Bounded wait (~120s),
+# non-fatal — if the hub stays unreachable we proceed anyway and
+# let the application surface the error.
+if [ -n "${CLAWBORRATOR_HUB_URL:-}" ]; then
+  hub_http="$(echo "${CLAWBORRATOR_HUB_URL}" | sed 's|^ws|http|')/healthz"
+  for attempt in $(seq 1 60); do
+    if curl -sS -m 3 "${hub_http}" >/dev/null 2>&1; then
+      [ "$attempt" -gt 1 ] && echo "[worker] hub reachable on attempt $attempt (${hub_http})"
+      break
+    fi
+    if [ "$attempt" -eq 60 ]; then
+      echo "[worker] WARN: hub still unreachable after 120s (${hub_http}); spawning claude anyway"
+    else
+      [ "$attempt" -eq 1 ] && echo "[worker] waiting for hub reachability (${hub_http})..."
+      sleep 2
+    fi
+  done
 fi
 
 if [ -n "${CLAUDE_INITIAL_PROMPT:-}" ]; then

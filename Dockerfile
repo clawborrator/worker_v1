@@ -24,15 +24,31 @@ RUN apt-get update && \
         curl \
         jq \
         gosu \
-        expect && \
+        expect \
+        tini && \
     rm -rf /var/lib/apt/lists/*
 
 # Claude Code itself + the clawborrator CLI (for any in-container
-# token / session inspection an operator might run). Both global so
-# `claude` and `claw` are on PATH without npx overhead.
+# token / session inspection an operator might run) + mongodb-mcp-server
+# (the canonical MongoDB MCP server used by data-grounded specialists).
+# All global so `claude`, `claw`, and `mongodb-mcp-server` are on PATH
+# without npx overhead — important because npx -y mongodb-mcp-server
+# flattens transitive deps in a way that breaks Node's strict ESM
+# resolver as non-root (a fast-string-truncated-width import explodes
+# from inside fast-string-width). Globally-installed packages get the
+# standard /usr/local/lib/node_modules layout where resolution works.
+# mongodb-mcp-server@1.11.0 — works correctly when globally installed.
+# The package's 1.11.0 release has a transitive-dep packaging issue
+# (@mcp-ui/server@6.1.0's `exports.import` points at a missing .mjs)
+# that surfaces ONLY when invoked via `npx -y` because of the flat
+# cache layout npx uses. With `npm install -g`, the standard nested
+# node_modules layout resolves the import path correctly. Verified
+# in this image as worker uid 1001 before committing the pin.
 RUN npm install -g \
         @anthropic-ai/claude-code \
-        clawborrator-cli
+        clawborrator-cli \
+        clawborrator-mcp \
+        mongodb-mcp-server@1.11.0
 
 # Docker CLI (client only, no daemon). Enables the "Docker outside of
 # Docker" pattern: when /var/run/docker.sock is bind-mounted in, the
@@ -131,5 +147,16 @@ WORKDIR /workspace
 # Anything after the image name on `docker run` becomes extra args
 # forwarded verbatim to `claude`.
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# tini as PID 1. The base entrypoint chains into `expect` (Claude
+# Code TUI wrapper) which is not a process reaper — any subprocess
+# (claude itself, MCP servers spawned via npx, chromium in the
+# playwright variant) that exits without being wait()'d leaves a
+# zombie under PID 1. Long-running workers accumulate these until
+# the container's pids.max is exhausted (~977 default on cgroup v2),
+# at which point new processes can't be spawned and the worker is
+# effectively dead. tini's whole job is SIGCHLD reaping, so wrapping
+# entrypoint with `tini --` fixes this for every worker derived
+# from this base. No effect on workers that don't accumulate
+# zombies (most bench specialists) — pure upside.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD []
