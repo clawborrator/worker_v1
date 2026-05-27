@@ -304,6 +304,17 @@ if [ -n "${GIT_USER_EMAIL:-}" ] || [ -n "${GIT_USER_NAME:-}" ]; then
   echo "[worker] git identity: ${GIT_USER_NAME:-(unset)} <${GIT_USER_EMAIL:-(unset)}>"
 fi
 
+# ─── Git safe.directory ──────────────────────────────────────
+# Bind-mounted /workspace often has a uid mismatch between the
+# host's directory owner and the in-container worker user. Git's
+# "dubious ownership" guard then refuses to operate on any repo
+# under /workspace (clone, fetch, status — all blocked). Whitelist
+# /workspace/* so playbook-side git ops (self-updates, inventory
+# pulls, REPO_URL clones) just work regardless of how the host
+# mount was provisioned.
+git config --global --add safe.directory '*'
+echo "[worker] git safe.directory: '*' (all repos trusted under this user)"
+
 # ─── Model selection ──────────────────────────────────────────
 # MODEL accepts the friendly aliases opus | sonnet | haiku and
 # translates to the explicit model ID via ANTHROPIC_MODEL. Anything
