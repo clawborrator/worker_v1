@@ -249,6 +249,19 @@ if [ "$(id -u)" = "0" ]; then
   chown -R "${WORKER_USER}:${WORKER_USER}" "${WORKER_HOME}"
   chown -R "${WORKER_USER}:${WORKER_USER}" /workspace
 
+  # ─── Git safe.directory (system-wide) ─────────────────────────
+  # Bind-mounted /workspace often has a uid mismatch between the
+  # host's directory owner and the in-container worker user. Git's
+  # "dubious ownership" guard then refuses to operate on any repo
+  # under /workspace (clone, fetch, status — all blocked). Whitelist
+  # all paths so any user in the container — `worker` (the agent),
+  # `root` (operator `docker exec`-ing in to debug), or anyone else
+  # — bypasses the check. --system writes /etc/gitconfig which root
+  # can do here in Phase 1; doing it later as `worker` via --global
+  # only fixes the worker user's own ~/.gitconfig.
+  git config --system --add safe.directory '*'
+  echo "[worker] git safe.directory: '*' (system-wide, /etc/gitconfig)"
+
   # ─── Docker socket access (optional — only if mounted) ─────────
   # If /var/run/docker.sock is mounted in, give the worker user
   # access. The socket arrives with whatever GID the host's docker
@@ -303,17 +316,6 @@ fi
 if [ -n "${GIT_USER_EMAIL:-}" ] || [ -n "${GIT_USER_NAME:-}" ]; then
   echo "[worker] git identity: ${GIT_USER_NAME:-(unset)} <${GIT_USER_EMAIL:-(unset)}>"
 fi
-
-# ─── Git safe.directory ──────────────────────────────────────
-# Bind-mounted /workspace often has a uid mismatch between the
-# host's directory owner and the in-container worker user. Git's
-# "dubious ownership" guard then refuses to operate on any repo
-# under /workspace (clone, fetch, status — all blocked). Whitelist
-# /workspace/* so playbook-side git ops (self-updates, inventory
-# pulls, REPO_URL clones) just work regardless of how the host
-# mount was provisioned.
-git config --global --add safe.directory '*'
-echo "[worker] git safe.directory: '*' (all repos trusted under this user)"
 
 # ─── Model selection ──────────────────────────────────────────
 # MODEL accepts the friendly aliases opus | sonnet | haiku and
