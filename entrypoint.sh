@@ -357,33 +357,77 @@ echo "[worker] model: ${MODEL:-haiku} (ANTHROPIC_MODEL=${ANTHROPIC_MODEL})"
 #
 # Only clones if REPO_URL is set AND the target dir doesn't already
 # have a .git directory. On second+ boots the existing checkout is
-# reused but we `git pull --rebase` so the latest playbook on the
-# remote is what runs. This means "docker restart picks up the
-# latest CLAUDE.md" is the actual contract.
+# reused and brought up to date per REPO_SYNC (see below) so the
+# latest playbook on the remote is what runs. "docker restart picks up
+# the latest CLAUDE.md" is the contract.
 #
-# Why --rebase and not --ff-only: many workers (the engager, the
-# cloud-chaser) commit their own activity output (audit JSON,
-# snapshots) into the repo every cycle. If such a commit is
-# unpushed when the operator pushes a playbook change, the local
-# branch has diverged and `--ff-only` refuses the pull entirely —
-# silently leaving the worker on the STALE playbook across the
-# restart. `--rebase` replays the worker's own commits on top of
-# the new remote commits instead; the worker's commits touch
-# data/* paths while playbook commits touch CLAUDE.md/specialists/,
-# so a rebase conflict is effectively impossible. If a rebase
-# somehow does wedge, abort it so the worker still boots into a
-# usable (if not-updated) checkout rather than a half-rebased one.
+# REPO_SYNC=rebase (default): `git pull --rebase`. Preserves local
+# commits, for workers (engager, cloud-chaser) that commit their own
+# activity output (audit JSON, snapshots) into the repo every cycle —
+# a hard reset would discard those. The catch: rebase refuses on a
+# dirty tree and used to SILENTLY continue on the stale playbook. Two
+# hardenings: (1) `core.fileMode false` so a playbook's boot-time
+# `chmod +x` on tracked scripts no longer dirties the tree (the real-
+# world trap — a monitor was stuck 4 commits behind because of it);
+# (2) a failed pull now logs a LOUD `!! RUNNING STALE PLAYBOOK` to
+# stderr instead of a quiet "continuing".
+#
+# REPO_SYNC=reset: `git fetch` + `git reset --hard origin/<ref>` +
+# `git clean -fd`. Always lands on the remote tip. For workers that
+# NEVER commit into their repo (monitors, routers — state lives in
+# /workspace/memory + /workspace/snapshots). Unwedgeable; the right
+# choice for any read-only-repo worker.
 REPO_DIR="/workspace/${REPO_DIR_NAME:-repo}"
 if [ -n "${REPO_URL:-}" ]; then
   if [ -d "${REPO_DIR}/.git" ]; then
-    echo "[worker] ${REPO_DIR} already contains a git checkout — pulling latest (rebase)"
-    if ! git -C "${REPO_DIR}" pull --rebase 2>&1; then
-      echo "[worker] git pull --rebase failed — aborting any partial rebase, continuing with existing checkout"
-      git -C "${REPO_DIR}" rebase --abort 2>/dev/null || true
-    elif [ -n "${REPO_REF:-}" ]; then
-      echo "[worker] re-checking out ref ${REPO_REF} after pull"
-      git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
-        echo "[worker] ref ${REPO_REF} not found — staying on default branch"
+    # Ignore executable-bit-only diffs. A playbook's boot-time `chmod +x`
+    # on tracked scripts (committed 100644) would otherwise dirty the
+    # tree, make the update below fail, and silently pin the worker to a
+    # STALE playbook across every restart. core.fileMode=false makes git
+    # blind to mode changes so this can't happen.
+    git -C "${REPO_DIR}" config core.fileMode false 2>/dev/null || true
+
+    # REPO_SYNC selects how an existing checkout is brought up to date:
+    #   rebase (default) — git pull --rebase; preserves local commits,
+    #     for workers that commit their own output into the repo
+    #     (engager, cloud-chaser).
+    #   reset — git fetch + git reset --hard origin/<ref>; always lands
+    #     on the remote tip. For workers that NEVER commit into their
+    #     repo (monitors, routers — they write state to /workspace/memory
+    #     and /workspace/snapshots, not /workspace/repo). Immune to a
+    #     dirty tree or divergence wedging the update.
+    if [ "${REPO_SYNC:-rebase}" = "reset" ]; then
+      echo "[worker] ${REPO_DIR} exists — hard-sync to origin (REPO_SYNC=reset)"
+      if git -C "${REPO_DIR}" fetch origin --quiet 2>&1; then
+        if [ -n "${REPO_REF:-}" ]; then
+          RESET_TARGET="origin/${REPO_REF}"
+        else
+          RESET_TARGET="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo '')"
+        fi
+        if [ -n "${RESET_TARGET}" ] && git -C "${REPO_DIR}" reset --hard "${RESET_TARGET}" 2>&1; then
+          git -C "${REPO_DIR}" clean -fd 2>&1 || true
+          echo "[worker] hard-synced ${REPO_DIR} to ${RESET_TARGET}"
+        else
+          echo "[worker] !! REPO_SYNC=reset could not reset ${REPO_DIR} to '${RESET_TARGET:-<no upstream>}' — RUNNING STALE PLAYBOOK" >&2
+        fi
+      else
+        echo "[worker] !! REPO_SYNC=reset fetch failed — RUNNING STALE PLAYBOOK (check REPO_PAT / network)" >&2
+      fi
+    else
+      echo "[worker] ${REPO_DIR} exists — pulling latest (rebase)"
+      if git -C "${REPO_DIR}" pull --rebase 2>&1; then
+        if [ -n "${REPO_REF:-}" ]; then
+          echo "[worker] re-checking out ref ${REPO_REF} after pull"
+          git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
+            echo "[worker] ref ${REPO_REF} not found — staying on default branch"
+        fi
+      else
+        git -C "${REPO_DIR}" rebase --abort 2>/dev/null || true
+        # LOUD, not the old quiet "continuing" — a stale playbook is a
+        # real failure, not a no-op. Workers that don't commit into their
+        # repo should set REPO_SYNC=reset to make updates unwedgeable.
+        echo "[worker] !! git pull --rebase failed — RUNNING STALE PLAYBOOK. Likely a dirty tree or local commits. Set REPO_SYNC=reset for workers that don't commit into their repo." >&2
+      fi
     fi
   else
     # Splice PAT into the URL if one was supplied. We rewrite into
@@ -416,10 +460,15 @@ if [ -n "${REPO_URL:-}" ]; then
     # state (e.g., empty repo with no main yet); just warn.
     if ! git clone "${EFFECTIVE_REPO_URL}" "${REPO_DIR}"; then
       echo "[worker] git clone failed — continuing without a repo (you can clone manually inside the container)"
-    elif [ -n "${REPO_REF:-}" ]; then
-      echo "[worker] checking out ref ${REPO_REF}"
-      git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
-        echo "[worker] ref ${REPO_REF} not found — staying on default branch"
+    else
+      # Blind git to executable-bit changes from the start so a boot-time
+      # `chmod +x` never dirties the tree (see the reuse path above).
+      git -C "${REPO_DIR}" config core.fileMode false 2>/dev/null || true
+      if [ -n "${REPO_REF:-}" ]; then
+        echo "[worker] checking out ref ${REPO_REF}"
+        git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
+          echo "[worker] ref ${REPO_REF} not found — staying on default branch"
+      fi
     fi
   fi
 fi
