@@ -94,6 +94,16 @@ RUN useradd --create-home --uid 1001 --shell /bin/bash worker && \
 
 WORKDIR /workspace
 
+# Default 1M-context OFF. Workers auth with a Max subscription token
+# (CLAUDE_CODE_OAUTH_TOKEN), and the 1M context beta needs usage credits
+# the subscription doesn't carry — so once a worker's context grows,
+# claude-code auto-requests 1M and the API errors with "Usage credits
+# required for 1M context". Headless workers can't run /model to switch,
+# so we force standard 200K context here. Override per-deployment with
+# CLAUDE_CODE_DISABLE_1M_CONTEXT=0 in the .env for a worker that has 1M
+# credits. (https://code.claude.com/docs/en/env-vars)
+ENV CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+
 # Environment contract (full doc in README.md):
 #   Auth — first-match-wins across these three, lower-priority envs unset:
 #   ANTHROPIC_API_KEY            preferred for API-billed inference. Raw key
