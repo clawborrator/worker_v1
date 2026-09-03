@@ -41,11 +41,10 @@ if [ "$(id -u)" = "0" ]; then
   #   1. ANTHROPIC_API_KEY        — sk-ant-api03-… raw API key.
   #      Claude Code reads it directly from env; no
   #      .credentials.json needed. Bills against the API account
-  #      (NOT the Max subscription). Disables the channels
-  #      feature server-side (claude refuses to load
-  #      --dangerously-load-development-channels under raw API-
-  #      key auth) — if you want channels, use one of the OAuth
-  #      paths instead.
+  #      (NOT the Max subscription). Channels work (verified on
+  #      Claude Code 2.1.195). Claude asks "Detected a custom API
+  #      key, use it?" on first run; the approval is pre-seeded
+  #      into ~/.claude.json below so the prompt never shows.
   #
   #   2. CLAUDE_CODE_OAUTH_TOKEN  — sk-ant-oat01-… OAuth access
   #      token. Produced by `claude setup-token` on a logged-in
@@ -133,7 +132,7 @@ if [ "$(id -u)" = "0" ]; then
   # logs aren't ambiguous about which path is in play.
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_ACCESS_TOKEN ANTHROPIC_REFRESH_TOKEN
-    echo "[worker] ANTHROPIC_API_KEY set — claude reads it directly from env (bills against API account, channels disabled)"
+    echo "[worker] ANTHROPIC_API_KEY set — claude reads it directly from env (bills against API account)"
   elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     unset ANTHROPIC_ACCESS_TOKEN ANTHROPIC_REFRESH_TOKEN
     echo "[worker] CLAUDE_CODE_OAUTH_TOKEN set — claude reads it directly from env (Max subscription, channels work)"
@@ -222,6 +221,22 @@ if [ "$(id -u)" = "0" ]; then
         }
       }' > "${GLOBAL_CFG}"
     echo "[worker] seeded ${GLOBAL_CFG}"
+  fi
+
+  # API-key approval. With ANTHROPIC_API_KEY set, claude prompts
+  # "Detected a custom API key in your environment, do you want to
+  # use it?" (default: No) and remembers the answer in
+  # customApiKeyResponses.approved as the key's LAST 20 CHARACTERS.
+  # Seed that on every boot (idempotent merge, survives a rotated
+  # key) so a headless worker never sits on the prompt. The expect
+  # wrapper still answers it as a fallback.
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    KEY_TAIL="$(printf '%s' "${ANTHROPIC_API_KEY}" | tail -c 20)"
+    jq --arg k "${KEY_TAIL}" '
+      .customApiKeyResponses.approved = ((.customApiKeyResponses.approved // []) + [$k] | unique)
+      | .customApiKeyResponses.rejected = ((.customApiKeyResponses.rejected // []) - [$k])
+    ' "${GLOBAL_CFG}" > "${GLOBAL_CFG}.tmp" && mv "${GLOBAL_CFG}.tmp" "${GLOBAL_CFG}"
+    echo "[worker] pre-approved ANTHROPIC_API_KEY in ${GLOBAL_CFG} (customApiKeyResponses)"
   fi
 
   # settings.json is rewritten on every boot — it's env-driven

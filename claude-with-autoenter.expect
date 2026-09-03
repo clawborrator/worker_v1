@@ -9,9 +9,14 @@
 # Two prompts handled:
 #
 #   1. "Detected a custom API key" — fires when ANTHROPIC_API_KEY
-#      is set. Default cursor is on "No (recommended)", so we send
-#      Up + Enter to pick "Yes". Sleeps around the keystrokes guard
-#      against Ink stale-state.
+#      is set and the approval is not yet in ~/.claude.json (the
+#      entrypoint seeds it, so this is a fallback). Default cursor
+#      is on "No (recommended)", so we send Up + Enter to pick
+#      "Yes". Sleeps around the keystrokes guard against Ink
+#      stale-state. Claude Code >= 2.1 renders the prompt with
+#      cursor-positioning escape codes between words
+#      ("API[25Gkey"), so the pattern tolerates non-space
+#      bytes between "API" and "key".
 #
 #   2. "WARNING: Loading development channels" — fires only when
 #      --dangerously-load-development-channels is passed standalone
@@ -27,6 +32,10 @@
 
 set timeout 60
 log_user 1
+# Answer the API-key prompt at most once: Ink re-renders the box on
+# every cursor move, which would re-trigger the pattern and toggle
+# the selection back to "No".
+set api_answered 0
 
 eval spawn claude $argv
 
@@ -34,15 +43,18 @@ expect {
   # Claude finished bootstrap — banner appeared. Stop dismissing
   # prompts; hand the PTY back. Match a single word (Ink interleaves
   # ANSI between words but not inside them).
-  -re "Welcome" {
+  -re {Welcome|Claude[^ ]{0,16}Code[^ ]{0,16}v[0-9]} {
     # fall through to interact
   }
 
-  -re "API key" {
-    sleep 0.2
-    send "\033\[A"   ;# Up arrow — move cursor from "No" to "Yes"
-    sleep 0.2
-    send "\r"
+  -re {API[^ ]{0,16}key} {
+    if {!$api_answered} {
+      set api_answered 1
+      sleep 0.5
+      send "\033\[A"   ;# Up arrow — move cursor from "No" to "Yes"
+      sleep 0.3
+      send "\r"
+    }
     exp_continue
   }
 
