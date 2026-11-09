@@ -488,6 +488,17 @@ if [ -n "${REPO_URL:-}" ]; then
   fi
 fi
 
+# ─── Optional live playbook sync ─────────────────────────────────
+# PLAYBOOK_SYNC_SECONDS=<n> keeps the checkout on the remote tip while
+# the worker runs (fast-forward only, see playbook-sync.sh), so merged
+# playbook changes go live within n seconds without a restart. Only
+# for workers that never commit into their repo. Survives the `exec`
+# below as a child of the launcher; tini reaps it.
+if [ -n "${PLAYBOOK_SYNC_SECONDS:-}" ] && [ -d "${REPO_DIR}/.git" ]; then
+  /usr/local/bin/playbook-sync "${REPO_DIR}" "${PLAYBOOK_SYNC_SECONDS}" "${REPO_REF:-}" </dev/null >/dev/null 2>&1 &
+  echo "[worker] playbook sync: every ${PLAYBOOK_SYNC_SECONDS}s (log: /workspace/.playbook-sync.log)"
+fi
+
 # ─── Orient claude to the /workspace layout ──────────────────────
 # /workspace/CLAUDE.md tells claude "the codebase is in ./repo —
 # don't touch .mcp.json or .claude/ here, those are worker plumbing."

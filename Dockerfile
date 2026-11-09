@@ -73,10 +73,14 @@ COPY claude-with-autoenter.expect /usr/local/bin/claude-with-autoenter.expect
 # claude doesn't have to hunt for them.
 COPY spawn-worker.sh /usr/local/bin/spawn-worker
 COPY terminate-worker.sh /usr/local/bin/terminate-worker
+# Live playbook sync loop, started by the entrypoint when
+# PLAYBOOK_SYNC_SECONDS is set (see playbook-sync.sh).
+COPY playbook-sync.sh /usr/local/bin/playbook-sync
 RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/claude-with-autoenter.expect \
              /usr/local/bin/spawn-worker \
-             /usr/local/bin/terminate-worker
+             /usr/local/bin/terminate-worker \
+             /usr/local/bin/playbook-sync
 
 # Non-root identity. Claude Code's --dangerously-skip-permissions
 # refuses to run as root ("for security reasons"), so when
@@ -142,6 +146,9 @@ ENV CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 #                                          dodgevipertech do as of 2026-05-17).
 #   REPO_URL                     optional — git clone into /workspace on first run
 #   REPO_REF                     optional — branch / tag / sha to checkout after clone
+#   PLAYBOOK_SYNC_SECONDS        optional: fetch + fast-forward the repo every N
+#                                          seconds while running, then run
+#                                          .bench/after-pull.sh (see playbook-sync.sh)
 #   REPO_PAT                     optional — PAT spliced into REPO_URL for private clones
 #   REPO_PAT_USER                optional — username paired with REPO_PAT (default x-access-token)
 #   REPO_DIR_NAME                optional — subdir under /workspace for the clone (default `repo`)
