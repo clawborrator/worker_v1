@@ -20,6 +20,7 @@ FROM node:22-bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
+        openssh-client \
         ca-certificates \
         curl \
         jq \
@@ -76,6 +77,9 @@ COPY terminate-worker.sh /usr/local/bin/terminate-worker
 # Live playbook sync loop, started by the entrypoint when
 # PLAYBOOK_SYNC_SECONDS is set (see playbook-sync.sh).
 COPY playbook-sync.sh /usr/local/bin/playbook-sync
+# GitHub's SSH host keys (from api.github.com/meta), pinned for
+# REPO_DEPLOY_KEY clones: StrictHostKeyChecking=yes against this file.
+COPY github_known_hosts /etc/clawborrator/github_known_hosts
 RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/claude-with-autoenter.expect \
              /usr/local/bin/spawn-worker \
@@ -149,6 +153,8 @@ ENV CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 #   PLAYBOOK_SYNC_SECONDS        optional: fetch + fast-forward the repo every N
 #                                          seconds while running, then run
 #                                          .bench/after-pull.sh (see playbook-sync.sh)
+#   REPO_DEPLOY_KEY              optional — base64 OpenSSH private key of a read-only GitHub deploy key;
+#                                  clones REPO_URL over ssh (preferred over REPO_PAT: one repo, read-only)
 #   REPO_PAT                     optional — PAT spliced into REPO_URL for private clones
 #   REPO_PAT_USER                optional — username paired with REPO_PAT (default x-access-token)
 #   REPO_DIR_NAME                optional — subdir under /workspace for the clone (default `repo`)

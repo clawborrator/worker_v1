@@ -116,6 +116,7 @@ if [ "$(id -u)" = "0" ]; then
     echo "REPO_URL=${REPO_URL:-}"
     echo "REPO_REF=${REPO_REF:-}"
     echo "REPO_DIR_NAME=${REPO_DIR_NAME:-repo}"
+    echo "REPO_DEPLOY_KEY=${REPO_DEPLOY_KEY:-}"
     echo "REPO_PAT=${REPO_PAT:-}"
     echo "REPO_PAT_USER=${REPO_PAT_USER:-x-access-token}"
     echo "GIT_USER_EMAIL=${GIT_USER_EMAIL:-}"
@@ -393,7 +394,37 @@ echo "[worker] model: ${MODEL:-haiku} (ANTHROPIC_MODEL=${ANTHROPIC_MODEL})"
 # /workspace/memory + /workspace/snapshots). Unwedgeable; the right
 # choice for any read-only-repo worker.
 REPO_DIR="/workspace/${REPO_DIR_NAME:-repo}"
+
+# REPO_DEPLOY_KEY: base64 OpenSSH private key of a read-only GitHub
+# deploy key on REPO_URL's repo. The repo is then cloned and fetched
+# over ssh with that key only (host key pinned in the image), and an
+# existing checkout's origin is rewritten to the ssh URL, which also
+# removes any PAT an earlier REPO_PAT clone left in .git/config.
+REPO_SSH_URL=""
+REPO_SSH_CMD=""
+if [ -n "${REPO_URL:-}" ] && [ -n "${REPO_DEPLOY_KEY:-}" ]; then
+  case "${REPO_URL}" in
+    https://github.com/*)
+      repo_path="${REPO_URL#https://github.com/}"
+      REPO_SSH_URL="git@github.com:${repo_path%.git}.git"
+      ;;
+    git@github.com:*) REPO_SSH_URL="${REPO_URL}" ;;
+    *) echo "[worker] !! REPO_DEPLOY_KEY set but REPO_URL is not a github.com repo; ignoring the key" >&2 ;;
+  esac
+  if [ -n "${REPO_SSH_URL}" ]; then
+    mkdir -p "${HOME}/.ssh" && chmod 700 "${HOME}/.ssh"
+    printf '%s' "${REPO_DEPLOY_KEY}" | base64 -d > "${HOME}/.ssh/repo_deploy_key"
+    chmod 600 "${HOME}/.ssh/repo_deploy_key"
+    REPO_SSH_CMD="ssh -i ${HOME}/.ssh/repo_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/clawborrator/github_known_hosts"
+    echo "[worker] repo auth: read-only deploy key over ssh (${REPO_SSH_URL})"
+  fi
+fi
+
 if [ -n "${REPO_URL:-}" ]; then
+  if [ -d "${REPO_DIR}/.git" ] && [ -n "${REPO_SSH_URL}" ]; then
+    git -C "${REPO_DIR}" remote set-url origin "${REPO_SSH_URL}"
+    git -C "${REPO_DIR}" config core.sshCommand "${REPO_SSH_CMD}"
+  fi
   if [ -d "${REPO_DIR}/.git" ]; then
     # Ignore executable-bit-only diffs. A playbook's boot-time `chmod +x`
     # on tracked scripts (committed 100644) would otherwise dirty the
@@ -453,7 +484,11 @@ if [ -n "${REPO_URL:-}" ]; then
     # fetch/push from inside CC keep working) — see .env.example
     # for the security caveat.
     EFFECTIVE_REPO_URL="${REPO_URL}"
-    if [ -n "${REPO_PAT:-}" ]; then
+    if [ -n "${REPO_SSH_URL}" ]; then
+      EFFECTIVE_REPO_URL="${REPO_SSH_URL}"
+      export GIT_SSH_COMMAND="${REPO_SSH_CMD}"
+      echo "[worker] cloning ${REPO_SSH_URL} into ${REPO_DIR} (deploy key)"
+    elif [ -n "${REPO_PAT:-}" ]; then
       case "${REPO_URL}" in
         https://*)
           host_path="${REPO_URL#https://}"
@@ -479,6 +514,9 @@ if [ -n "${REPO_URL:-}" ]; then
       # Blind git to executable-bit changes from the start so a boot-time
       # `chmod +x` never dirties the tree (see the reuse path above).
       git -C "${REPO_DIR}" config core.fileMode false 2>/dev/null || true
+      # Later fetches (playbook-sync, the agent) use the deploy key too.
+      [ -n "${REPO_SSH_CMD}" ] && git -C "${REPO_DIR}" config core.sshCommand "${REPO_SSH_CMD}"
+      unset GIT_SSH_COMMAND
       if [ -n "${REPO_REF:-}" ]; then
         echo "[worker] checking out ref ${REPO_REF}"
         git -C "${REPO_DIR}" checkout "${REPO_REF}" || \
